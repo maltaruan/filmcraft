@@ -62,7 +62,7 @@ impl GradeSpace {
     }
 
     /// Working linear → grading signal (1 = white; HDR values above HDR White are > 1).
-    #[inline]
+    #[inline(always)]
     pub fn encode(&self, c: [f32; 3]) -> [f32; 3] {
         match *self {
             GradeSpace::Sdr => c.map(|v| linear_to_srgb_fast(v.max(0.0))),
@@ -83,7 +83,7 @@ impl GradeSpace {
 
     /// Grading signal → working linear. SDR clamps to 0…1 (white); HDR keeps values above HDR
     /// White up to 10 000 cd/m² (PQ) or the HLG signal's range.
-    #[inline]
+    #[inline(always)]
     pub fn decode(&self, v: [f32; 3]) -> [f32; 3] {
         match *self {
             GradeSpace::Sdr => v.map(|q| srgb_to_linear_fast(q.clamp(0.0, 1.0))),

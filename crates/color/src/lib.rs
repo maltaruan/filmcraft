@@ -194,7 +194,7 @@ fn srgb_fast_table(f: fn(f32) -> f32) -> Vec<f32> {
 }
 
 /// Linear interpolation in a table sampled at `i / SRGB_FAST_N`, for `v` in 0…1.
-#[inline]
+#[inline(always)]
 fn srgb_fast_lookup(t: &[f32], v: f32) -> f32 {
     let x = v * SRGB_FAST_N as f32;
     let i = (x as usize).min(SRGB_FAST_N - 1);
@@ -204,14 +204,14 @@ fn srgb_fast_lookup(t: &[f32], v: f32) -> f32 {
 }
 
 /// [`srgb_to_linear`] through a table for 0…1 (per-pixel grading); exact outside that range.
-#[inline]
+#[inline(always)]
 pub fn srgb_to_linear_fast(v: f32) -> f32 {
     static T: OnceLock<Vec<f32>> = OnceLock::new();
     if (0.0..=1.0).contains(&v) { srgb_fast_lookup(T.get_or_init(|| srgb_fast_table(srgb_to_linear)), v) } else { srgb_to_linear(v) }
 }
 
 /// [`linear_to_srgb`] through a table for 0…1 (per-pixel grading); exact outside that range.
-#[inline]
+#[inline(always)]
 pub fn linear_to_srgb_fast(v: f32) -> f32 {
     static T: OnceLock<Vec<f32>> = OnceLock::new();
     if (0.0..=1.0).contains(&v) { srgb_fast_lookup(T.get_or_init(|| srgb_fast_table(linear_to_srgb)), v) } else { linear_to_srgb(v) }
