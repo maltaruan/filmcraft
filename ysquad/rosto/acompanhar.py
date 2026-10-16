@@ -1,7 +1,7 @@
 """Foco que acompanha o rosto: gera os `focusKeys` de `clip.fillFrame` para um vídeo.
 
 Uso:
-    python3 -I acompanhar.py VIDEO [--cada 2] [--cli CAMINHO_DO_filmcraft-cli]
+    python3 -I acompanhar.py VIDEO [--cada 2] [--trechos 120-130,300-315] [--cli CAMINHO_DO_filmcraft-cli]
 
 Abre o vídeo no FilmCraft sem janela (MCP), tira um quadro inteiro a cada `--cada` segundos,
 acha o maior rosto com o Vision do macOS (`rosto.swift`, compilado na primeira vez), suaviza
@@ -58,6 +58,7 @@ def main():
     a = argparse.ArgumentParser()
     a.add_argument("video")
     a.add_argument("--cada", type=float, default=2.0)
+    a.add_argument("--trechos", help="só estes intervalos do vídeo (segundos, a-b separados por vírgula): os que o corte usa")
     a.add_argument("--cli", default=os.path.join(AQUI, "..", "..", "target", "release", "filmcraft-cli"))
     o = a.parse_args()
     m = Mcp(o.cli)
@@ -65,10 +66,17 @@ def main():
     m.run("file.newSequenceFromClip", {"items": [item]})
     dur = m.run("sequence.inspect")["video"][0]["items"][0]["duration"] / 254_016_000_000
     tmp = tempfile.mkdtemp(prefix="rosto-")
-    ts, t = [], 0.0
-    while t < dur:
-        ts.append(round(t, 3))
-        t += max(o.cada, 0.2)
+    faixas = [(0.0, dur)]
+    if o.trechos:
+        # um quadro de folga em volta de cada trecho, pra suavização ter vizinho
+        faixas = [(max(0.0, float(a) - o.cada), min(dur, float(b) + o.cada)) for a, b in (x.split("-") for x in o.trechos.split(","))]
+    ts = []
+    for ini, fim in faixas:
+        t = ini
+        while t < fim:
+            ts.append(round(t, 3))
+            t += max(o.cada, 0.2)
+    ts = sorted(set(ts))
     feitos = [(t, os.path.join(tmp, f"{i:05d}.png")) for i, t in enumerate(ts)]
     feitos = [(t, p) for t, p in feitos if m.frame(t, p)]
     m.p.stdin.close()

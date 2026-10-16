@@ -4,7 +4,7 @@ Uso:
     python3 -I montar_video.py PASTA_DO_CORTE SAIDA_SEM_EXTENSAO
         [--formato 9x16|16x9|4x3] [--motion CLIPE.mov --motion-em 0.5]
         [--cor] [--sem-legenda | --legenda-viva [ESTILO] | --amostras-legenda PASTA] [--legenda-tamanho 72]
-        [--musica TRILHA --musica-db -18] [--sem-voz] [--lufs -14] [--cli CAMINHO_DO_filmcraft-cli]
+        [--musica TRILHA --musica-db -18] [--sem-voz] [--lufs -14] [--sabor LC-709TypeA] [--sem-log] [--cli CAMINHO_DO_filmcraft-cli]
 
 PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legenda.srt`).
 
@@ -13,7 +13,11 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
   Vision do macOS), mapeado do tempo da fonte para o tempo de cada trecho do corte.
 - --motion: clipe com transparência (ex.: HyperFrames `--format mov`) na V2. Vertical, encaixa
   no quadro; horizontal, entra a 100 % no terço de baixo à esquerda.
-- --cor: Lumetri leve (exposição, contraste, saturação, altas luzes, sombras).
+- Log da Sony (S-Log2 / S-Log3, lido do XML do vídeo de origem): `../cor/log_709.py --auto` gera a
+  LUT de entrada do corte (exposição medida na pele, LUT oficial da Sony, `--sabor` escolhe qual) e
+  ela entra no Lumetri de cada trecho, na placa de vídeo. --sem-log desliga.
+- --cor: Lumetri leve (exposição, contraste, saturação, altas luzes, sombras); em log fica de fora
+  salvo se pedido, porque a conversão já entrega a imagem pronta.
 - A legenda vem dos <title> do FCPXML (o `.srt` só se o corte não tiver) e sai gravada na imagem.
 - --legenda-viva [ESTILO]: em vez da legenda fixa, a camada animada do `legenda_viva.py`
   (HyperFrames), renderizada em paralelo e posta na trilha de cima. Estilos: caixa (padrão),
@@ -86,11 +90,33 @@ def video_do_fcpxml(path):
     return urllib.parse.unquote(m.group(1))
 
 
-def focos_do_rosto(video, cli):
+def trechos_da_fonte(clipes):
+    """Os intervalos do vídeo de origem que o corte usa, em segundos (`a-b,c-d`)."""
+    return ",".join(f"{c['sourceIn'] / TPS:.2f}-{c['sourceOut'] / TPS:.2f}" for c in clipes)
+
+
+def focos_do_rosto(video, cli, trechos=None):
     """focusKeys no tempo da FONTE (o clipe inteiro numa sequência que começa nele)."""
-    out = subprocess.run([sys.executable, "-I", os.path.join(AQUI, "..", "rosto", "acompanhar.py"), video, "--cli", cli],
+    extra = ["--trechos", trechos] if trechos else []
+    out = subprocess.run([sys.executable, "-I", os.path.join(AQUI, "..", "rosto", "acompanhar.py"), video, "--cli", cli, *extra],
                          capture_output=True, text=True, check=True).stdout
     return json.loads(out)
+
+
+def converter_log(video, corte, sabor, trechos=None):
+    """A LUT de entrada do log da Sony (None se o vídeo não é log): gerada uma vez por corte e sabor."""
+    cor = os.path.join(AQUI, "..", "cor", "log_709.py")
+    d = json.loads(subprocess.run([sys.executable, "-I", cor, "--detectar", video], capture_output=True, text=True, check=True).stdout)
+    if not d.get("curva"):
+        return None
+    cube = os.path.join(corte, f"log_709_{sabor}.cube")
+    if not os.path.exists(cube):
+        extra = ["--intervalos", trechos] if trechos else []
+        r = subprocess.run([sys.executable, "-I", cor, cube, "--auto", video, "--sabor", sabor, *extra], capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"conversão do log falhou: {r.stderr[-1500:]}")
+        print(f"log: {r.stdout.strip()}", file=sys.stderr)
+    return cube
 
 
 def formato_da_fonte(fcpxml):
@@ -205,6 +231,8 @@ def main():
     a.add_argument("--musica")
     a.add_argument("--musica-db", type=float, default=-18.0, help="nível da música sem fala")
     a.add_argument("--sem-voz", action="store_true")
+    a.add_argument("--sabor", default="LC-709", help="LUT oficial da Sony na conversão do log")
+    a.add_argument("--sem-log", action="store_true")
     a.add_argument("--lufs", type=float, default=-14.0)
     a.add_argument("--legenda-tamanho", type=float, default=72.0, help="16x9/4x3, px por 1080 linhas")
     a.add_argument("--cli", default=os.path.join(AQUI, "..", "..", "target", "release", "filmcraft-cli"))
@@ -237,7 +265,7 @@ def main():
         m.run("sequence.settings", {"width": w, "height": h})
 
     tem_efeitos = os.path.exists(os.path.join(o.corte, "efeitos.json"))
-    focos = focos_do_rosto(video_do_fcpxml(xml[0]), cli) if (h <= w or tem_efeitos) else []
+    focos = focos_do_rosto(video_do_fcpxml(xml[0]), cli, trechos_da_fonte(clipes)) if (h <= w or tem_efeitos) else []
     if h > w:
         m.run("clip.fillFrame", {"clips": [c["clip"] for c in clipes]})
     else:
@@ -254,8 +282,14 @@ def main():
 
     aplicar_efeitos(m, o.corte, xml[0], clipes, focos)
     ids = [c["clip"] for c in clipes]
+    cube = None if o.sem_log else converter_log(video_do_fcpxml(xml[0]), o.corte, o.sabor, trechos_da_fonte(clipes))
+    if cube:
+        for cid in ids:
+            m.run("effects.apply", {"clips": [cid], "effect": "Lumetri Color"})
+            m.run("lumetri.setInputLut", {"clip": cid, "path": cube})
     if o.cor:
-        m.run("effects.apply", {"clips": ids, "effect": "Lumetri Color"})
+        if not cube:  # em log o Lumetri da conversão já está no clipe
+            m.run("effects.apply", {"clips": ids, "effect": "Lumetri Color"})
         for cid in ids:
             for k, v in COR.items():
                 m.run("effects.setParam", {"clip": cid, "effect": "lumetri", "param": k, "value": v})

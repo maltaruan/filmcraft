@@ -30,6 +30,12 @@ LUTS_SONY = {
     "slog3": os.path.join(RESOLVE, "Sony", "SLog3SGamut3.CineToLC-709.cube"),
     "slog2": os.path.join(RESOLVE, "Meus LUTS", "LUTS Log", "From_SLog2SGumut_To_LC-709_.cube"),
 }
+# os quatro sabores oficiais de cada perfil (a Sony publica os mesmos quatro)
+SABORES = {
+    "slog3": {k: os.path.join(RESOLVE, "Sony", f"SLog3SGamut3.CineTo{k}.cube") for k in ("LC-709", "LC-709TypeA", "Cine+709", "SLog2-709")},
+    "slog2": {k: os.path.join(RESOLVE, "Meus LUTS", "LUTS Log", f"From_SLog2SGumut_To_{k}{'' if k == 'Cine+709' else '_'}.cube")
+              for k in ("LC-709", "LC-709TypeA", "Cine+709", "SLog2-709")},
+}
 # a gama que cada LUT oficial espera na entrada
 GAMA_DA_LUT = {"slog3": "sgamut3cine", "slog2": "sgamut"}
 
@@ -176,7 +182,7 @@ def detectar(video):
     return {"curva": curva, "gama": gama, "gamma_sony": g.group(1) if g else None, "primarias_sony": p.group(1) if p else None}
 
 
-def amostras_de_pele(video, n=5, largura=960):
+def amostras_de_pele(video, n=5, largura=960, intervalos=None):
     """Mediana do sinal (0 a 1) da pele em `n` quadros: uma janela no meio do maior rosto
     (entre os olhos e o bigode), achado pelo Vision (`../rosto/rosto.swift`)."""
     ffmpeg = "/opt/homebrew/bin/ffmpeg" if os.path.exists("/opt/homebrew/bin/ffmpeg") else "ffmpeg"
@@ -185,10 +191,22 @@ def amostras_de_pele(video, n=5, largura=960):
     exe = os.path.join(ROSTO, "rosto")
     if not os.path.exists(exe):
         subprocess.run(["swiftc", "-O", os.path.join(ROSTO, "rosto.swift"), "-o", exe], check=True)
+    faixas = intervalos or [(0.0, dur)]
+    total = sum(b - a for a, b in faixas)
+
+    def instante(k):
+        # o k-ésimo de n pontos espalhados pelo tempo somado dos intervalos
+        alvo = total * (k + 0.5) / n
+        for a, b in faixas:
+            if alvo <= b - a:
+                return a + alvo
+            alvo -= b - a
+        return faixas[-1][1]
+
     pele = []
     with tempfile.TemporaryDirectory() as tmp:
         for i in range(n):
-            t = dur * (i + 0.5) / n
+            t = instante(i)
             png, raw = os.path.join(tmp, f"{i}.png"), os.path.join(tmp, f"{i}.rgb")
             vf = f"scale={largura}:-2"
             subprocess.run([ffmpeg, "-loglevel", "error", "-y", "-ss", f"{t:.2f}", "-i", video, "-frames:v", "1", "-vf", vf, png], check=True)
@@ -224,12 +242,47 @@ def exposicao_pela_pele(curva, gama, pele, lut=None, alvo=PELE_ALVO):
     return round((lo + hi) / 2, 2)
 
 
+def amostras_de_cor(video, trecho, pasta):
+    """Um quadro e 4 s de vídeo por sabor oficial da Sony, cada um com a exposição resolvida pela
+    pele, e uma folha com os quadros lado a lado (ordem de SABORES)."""
+    ffmpeg = "/opt/homebrew/bin/ffmpeg" if os.path.exists("/opt/homebrew/bin/ffmpeg") else "ffmpeg"
+    d = detectar(video)
+    if not d["curva"]:
+        sys.exit(f"sem log no XML: {d}")
+    r = amostras_de_pele(trecho)
+    if not r:
+        sys.exit("nenhum rosto no trecho")
+    os.makedirs(pasta, exist_ok=True)
+    quadros, saida = [], {}
+    for sabor, lut in SABORES[d["curva"]].items():
+        ev = exposicao_pela_pele(d["curva"], d["gama"], r[0], lut)
+        cube = os.path.join(pasta, f"{sabor}.cube")
+        escrever_cube(cube, conversao(d["curva"], d["gama"], ev, (1, 1, 1), lut), 33, f"{sabor} {ev:+.2f}")
+        # a Sony grava YUV BT.709 em faixa cheia sem declarar a matriz: sem isto o ffmpeg usa BT.601
+        pre = "scale=in_color_matrix=bt709:in_range=full:out_range=full,format=gbrp,"
+        esc = cube.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+        png, mp4 = os.path.join(pasta, f"{sabor}.png"), os.path.join(pasta, f"{sabor}.mp4")
+        subprocess.run([ffmpeg, "-loglevel", "error", "-y", "-ss", "3", "-i", trecho, "-frames:v", "1",
+                        "-vf", f"{pre}lut3d=file='{esc}',scale=-2:720", png], check=True)
+        subprocess.run([ffmpeg, "-loglevel", "error", "-y", "-i", trecho, "-t", "4", "-an", "-vf", f"{pre}lut3d=file='{esc}',scale=-2:1080",
+                        "-c:v", "h264_videotoolbox", "-b:v", "12M", mp4], check=True)
+        quadros.append(png)
+        saida[sabor] = ev
+    folha = os.path.join(pasta, "folha.png")
+    subprocess.run([ffmpeg, "-loglevel", "error", "-y", *sum((["-i", q] for q in quadros), []),
+                    "-filter_complex", f"hstack=inputs={len(quadros)}", folha], check=True)
+    return {"folha": folha, "curva": d["curva"], "gama": d["gama"], "exposicao_por_sabor": saida}
+
+
 def main():
     a = argparse.ArgumentParser()
     a.add_argument("saida", nargs="?")
     a.add_argument("--detectar", metavar="VIDEO")
     a.add_argument("--auto", metavar="VIDEO", help="curva/gama do XML e exposição medida na pele")
     a.add_argument("--trecho", metavar="VIDEO", help="--auto: medir a pele neste vídeo (padrão: o próprio VIDEO)")
+    a.add_argument("--intervalos", help="com --auto: medir a pele só nestes trechos do vídeo (a-b,c-d, segundos)")
+    a.add_argument("--amostras", metavar="PASTA", help="com --auto: os quatro sabores da Sony lado a lado, pra escolher")
+    a.add_argument("--sabor", help="com --auto: LC-709 (padrão), LC-709TypeA, Cine+709 ou SLog2-709")
     a.add_argument("--curva", choices=CURVAS)
     a.add_argument("--gama", choices=PRIMARIAS)
     a.add_argument("--exposicao", type=float, default=0.0, help="pontos de luz, em luz de cena")
@@ -240,13 +293,19 @@ def main():
     if o.detectar:
         print(json.dumps(detectar(o.detectar)))
         return
+    if o.auto and o.amostras:
+        print(json.dumps(amostras_de_cor(o.auto, o.trecho or o.auto, o.amostras)))
+        return
     medida = None
     if o.auto:
         d = detectar(o.auto)
         if not d["curva"] or not d["gama"]:
             sys.exit(f"sem curva/gama de log no XML da Sony: {d}")
         o.curva, o.gama = d["curva"], d["gama"]
-        r = amostras_de_pele(o.trecho or o.auto)
+        if o.sabor:
+            o.lut = SABORES[o.curva][o.sabor]
+        iv = [tuple(map(float, x.split("-"))) for x in o.intervalos.split(",")] if o.intervalos else None
+        r = amostras_de_pele(o.trecho or o.auto, intervalos=iv)
         if r:
             medida = {"pele_sinal": [round(v, 4) for v in r[0]], "quadros_com_rosto": r[1]}
             o.exposicao = exposicao_pela_pele(o.curva, o.gama, r[0], o.lut)
