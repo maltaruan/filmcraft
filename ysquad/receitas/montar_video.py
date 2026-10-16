@@ -19,10 +19,14 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
 - efeitos.json na pasta do corte (opcional), escrito por quem leu a fala, com índices de palavra
   do `indice.py` (inclusivos):
     {"zoom": [{"de": 16, "ate": 18, "escala": 115, "entrada": "seco|suave"}],
-     "desfoque": [{"de": 56, "ate": 58, "forca": 40, "sentido": "abre|fecha"}]}
+     "desfoque": [{"de": 56, "ate": 58, "forca": 40, "sentido": "abre|fecha"}],
+     "broll": [{"de": 61, "ate": 64, "arquivo": "/caminho/trecho.mp4", "inicio": 0.0, "zoom": 108}]}
   zoom = efeito Transform centrado no rosto, por cima do enquadramento: "seco" corta pra escala
   na primeira palavra e volta no fim da última; "suave" aproxima devagar até o fim e corta de volta.
   desfoque = Gaussian Blur: "abre" vai da força a zero (foco que chega), "fecha" de zero à força.
+  broll = o trecho aprovado (pela get-brolls) cobre a fala da primeira à última palavra, numa
+  trilha acima do vídeo, sem som, preenchendo o quadro; "zoom" aproxima devagar até a escala dada.
+  Camadas, de baixo pra cima: vídeo, B-roll, motion, legenda viva.
 - Exporta H.264 com o chip de vídeo do Mac (`hardwareEncoding: auto`).
 """
 import argparse, glob, json, os, re, subprocess, sys, time, urllib.parse
@@ -156,7 +160,24 @@ def aplicar_efeitos(m, corte, xml, clipes, focos):
             kf(cid, "gaussian_blur", "blurriness", a, ida, "linear")
             kf(cid, "gaussian_blur", "blurriness", b, volta, "hold")
             kf(cid, "gaussian_blur", "blurriness", b + um_quadro, 0.0, "hold")
-    print(f"efeitos: {len(plano.get('zoom', []))} zoom, {len(plano.get('desfoque', []))} desfoque", file=sys.stderr)
+    trilha_broll = None
+    for r in plano.get("broll", []):
+        t0, t1 = faixa(r)
+        item = m.run("file.import", {"paths": [os.path.abspath(r["arquivo"])]})["items"][0]
+        ini = round(float(r.get("inicio", 0.0)) * TPS)
+        bc = m.run("timeline.place", {"item": item, "track": trilha_broll or "new", "time": round(t0 * TPS), "sourceIn": ini,
+                                      "duration": round((t1 - t0) * TPS), "audio": False})["clips"][0]
+        trilha_broll = trilha_broll or "V2"
+        m.run("clip.fillFrame", {"clips": [bc]})
+        if r.get("zoom"):
+            # o clipe como ficou (o encaixe arredonda pro quadro)
+            c = next(x for tr in m.run("sequence.inspect")["video"] for x in tr["items"] if x["clip"] == bc)
+            por_id[bc] = c
+            m.run("effects.apply", {"clips": [bc], "effect": "Transform"})
+            kf(bc, "transform", "scale_height", c["sourceIn"], 100.0, "linear")
+            kf(bc, "transform", "scale_height", c["sourceOut"], float(r["zoom"]), "hold")
+    print(f"efeitos: {len(plano.get('zoom', []))} zoom, {len(plano.get('desfoque', []))} desfoque, "
+          f"{len(plano.get('broll', []))} B-roll", file=sys.stderr)
 
 
 def main():
@@ -233,8 +254,7 @@ def main():
             m.run("captions.setStyle", {"track": trilha, "size": o.legenda_tamanho, "anchor": "bottom", "margin": 0.1})
     if o.motion:
         item = m.run("file.import", {"paths": [os.path.abspath(o.motion)]})["items"][0]
-        m.run("sequence.addTracks", {"video": 1, "audio": 0})
-        mc = m.run("timeline.place", {"item": item, "track": "V2", "seconds": o.motion_em})["clips"][0]
+        mc = m.run("timeline.place", {"item": item, "track": "new", "seconds": o.motion_em})["clips"][0]
         if h > w:
             m.run("clip.fitToFrame", {"clips": [mc]})
             # a legenda do corte fica a 20% da borda de baixo: a faixa sobe pra não pisar nela
@@ -247,9 +267,7 @@ def main():
         if legenda.returncode != 0:
             sys.exit(f"legenda viva falhou: {erro[-1500:]}")
         item = m.run("file.import", {"paths": [mov]})["items"][0]
-        m.run("sequence.addTracks", {"video": 1, "audio": 0})
-        trilha = "V3" if o.motion else "V2"
-        lc = m.run("timeline.place", {"item": item, "track": trilha, "seconds": 0.0})["clips"][0]
+        lc = m.run("timeline.place", {"item": item, "track": "new", "seconds": 0.0})["clips"][0]
         m.run("clip.fitToFrame", {"clips": [lc]})
 
     t = time.time()
