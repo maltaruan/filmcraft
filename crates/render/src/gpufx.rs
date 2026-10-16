@@ -199,6 +199,8 @@ pub enum FxOp {
         /// Curves, wheels, look / look LUT and HSL Secondary baked into a 3-D table, applied after
         /// the basic stage and the vignette (their place in [`crate::effects`]' Lumetri).
         lut: Option<std::sync::Arc<Lut3>>,
+        /// The Basic section's Input LUT as a colour table, applied first (its place on the CPU).
+        pre_lut: Option<std::sync::Arc<Lut3>>,
     },
 }
 
@@ -565,8 +567,9 @@ impl FxOp {
                 let hsl_spatial = hsl_on && (f(e, "hsl_denoise", cx) > 0.0 || f(e, "hsl_blur", cx) > 0.0);
                 let needs_lut = has_curves || has_wheels || hsl_on || has_look_lut || look != 0;
 
-                let gpu_capable = !is_hdr && !has_input_lut && sharpen.abs() <= 1e-3 && !hsl_spatial;
+                let gpu_capable = !is_hdr && sharpen.abs() <= 1e-3 && !hsl_spatial;
                 let lut = (gpu_capable && needs_lut).then(|| crate::effects::lumetri_post_lut(e, cx));
+                let pre_lut = (gpu_capable && has_input_lut).then(|| crate::effects::lumetri_input_lut(e, cx));
 
                 let bf = |id: &str| if basic_on { f(e, id, cx) } else { 0.0 };
                 let temp = bf("temperature") / 100.0;
@@ -611,6 +614,7 @@ impl FxOp {
                     aspect,
                     gpu_capable,
                     lut,
+                    pre_lut,
                 }
             }
             _ => return None,
@@ -672,7 +676,7 @@ impl FxOp {
     /// A Lumetri op carrying a baked colour table (its CPU rendering then goes through the exact
     /// stages of `effects::lumetri` instead).
     pub fn has_lut(&self) -> bool {
-        matches!(self, FxOp::Lumetri { lut: Some(_), .. })
+        matches!(self, FxOp::Lumetri { lut: Some(_), .. } | FxOp::Lumetri { pre_lut: Some(_), .. })
     }
 
     /// The CPU reference.
@@ -987,15 +991,21 @@ impl FxOp {
                 vfeather,
                 aspect,
                 lut,
+                pre_lut,
                 ..
             } => {
                 let lut = lut.clone();
+                let pre_lut = pre_lut.clone();
                 let gains = *gains;
                 let (exposure, contrast, hl, sh, wh, bl, sat) = (*exposure, *contrast, *hl, *sh, *wh, *bl, *sat);
                 let (creative_on, faded, vib, st, ht) = (*creative_on, *faded, *vib, *st, *ht);
                 let (vignette_on, va, vmid, vround, vfeather, aspect) = (*vignette_on, *va, *vmid, *vround, *vfeather, *aspect);
                 let (w, h) = (img.w as f32, img.h as f32);
                 img.map_rgb(|c, x, y| {
+                    let c = match &pre_lut {
+                        Some(l) => l.sample(c),
+                        None => c,
+                    };
                     // white balance + exposure in linear light
                     let lin = [c[0] * gains[0] * exposure, c[1] * gains[1] * exposure, c[2] * gains[2] * exposure];
                     let mut v = enc(lin);

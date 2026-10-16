@@ -213,8 +213,14 @@ fn steps(op: &FxOp) -> Vec<Step> {
             vfeather,
             aspect,
             lut,
+            pre_lut,
             ..
         } => {
+            if let Some(l) = pre_lut {
+                let mut s = step(OP_LUT3, [l.n as u32, 0, 0, 0], &[]);
+                s.lut = Some(l.clone());
+                out.push(s);
+            }
             let ge = [gains[0] * exposure, gains[1] * exposure, gains[2] * exposure];
             let b0 = -bl * 0.15;
             let w0 = 1.0 - wh * 0.15;

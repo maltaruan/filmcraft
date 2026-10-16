@@ -1171,6 +1171,42 @@ pub(crate) fn lumetri_post_lut(e: &EffectInstance, cx: &FxCtx) -> std::sync::Arc
     lut
 }
 
+/// The Basic section's Input LUT as a colour table for the GPU (the exact CPU expression of
+/// [`lumetri`] on every grid colour), cached by the effect settings and the resolved LUT.
+pub(crate) fn lumetri_input_lut(e: &EffectInstance, cx: &FxCtx) -> std::sync::Arc<crate::gpufx::Lut3> {
+    use std::hash::{Hash, Hasher};
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<crate::gpufx::Lut3>>>> = std::sync::OnceLock::new();
+    let input = crate::luts::resolve(cx.project, text(e, "input_lut"));
+    let gs = grade_space(e, cx, "hdr_white");
+    let mut hs = std::collections::hash_map::DefaultHasher::new();
+    "input".hash(&mut hs);
+    text(e, "input_lut").hash(&mut hs);
+    input.as_ref().map(|l| std::sync::Arc::as_ptr(l) as usize).hash(&mut hs);
+    let id = hs.finish();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(l) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&id) {
+        return l.clone();
+    }
+    let n = POST_LUT_N;
+    let m = (n - 1) as f32;
+    let data = (0..n * n * n)
+        .map(|i| {
+            let c = dec([(i % n) as f32 / m, ((i / n) % n) as f32 / m, (i / (n * n)) as f32 / m]);
+            match &input {
+                Some(l) => gs.decode(within_unit(gs.encode(c), false, |v| l.apply(v))),
+                None => c,
+            }
+        })
+        .collect();
+    let lut = std::sync::Arc::new(crate::gpufx::Lut3 { n, id, data });
+    let mut g = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if g.len() >= 64 {
+        g.clear();
+    }
+    g.insert(id, lut.clone());
+    lut
+}
+
 fn lumetri_advanced(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
     const N: usize = 1024;
     let (creative_on, curves_on, wheels_on) = (on(e, "creative_on"), on(e, "curves_on"), on(e, "wheels_on"));

@@ -521,7 +521,6 @@ fn lumetri_unsupported_sections_fall_back() {
     // sharpen > 0 and input LUT (explicitly required by brief)
     assert!(falls_back(&effect("lumetri", &[("sharpen", fl(10.0)), ("input_lut", ParamValue::Text("custom.cube".into()))]), &c));
     assert!(falls_back(&effect("lumetri", &[("sharpen", fl(20.0))]), &c));
-    assert!(falls_back(&effect("lumetri", &[("input_lut", ParamValue::Text("test.cube".into()))]), &c));
     // HSL Secondary whose mask is denoised or blurred looks at neighbours: no colour table
     assert!(falls_back(&effect("lumetri", &[("hsl_on", ParamValue::Bool(true)), ("hsl_denoise", fl(30.0))]), &c));
     assert!(falls_back(&effect("lumetri", &[("hsl_on", ParamValue::Bool(true)), ("hsl_blur", fl(30.0))]), &c));
@@ -539,6 +538,7 @@ fn lumetri_per_pixel_sections_bake_a_table() {
     let c = cx(Tick::ZERO, 1.0);
     for (i, e) in [
         effect("lumetri", &[("look_lut", ParamValue::Text("look.cube".into()))]),
+        effect("lumetri", &[("input_lut", ParamValue::Text("test.cube".into()))]),
         effect("lumetri", &[("look", ch(1))]),
         effect("lumetri", &[("curve_luma", ParamValue::Curve(vec![[0.0, 0.1], [1.0, 0.9]]))]),
         effect("lumetri", &[("hue_vs_sat", ParamValue::Curve(vec![[0.5, 0.5]]))]),
