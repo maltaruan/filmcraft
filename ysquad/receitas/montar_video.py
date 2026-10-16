@@ -3,7 +3,7 @@
 Uso:
     python3 -I montar_video.py PASTA_DO_CORTE SAIDA_SEM_EXTENSAO
         [--formato 9x16|16x9|4x3] [--motion CLIPE.mov --motion-em 0.5]
-        [--cor] [--sem-legenda] [--legenda-tamanho 72] [--cli CAMINHO_DO_filmcraft-cli]
+        [--cor] [--sem-legenda | --legenda-viva] [--legenda-tamanho 72] [--cli CAMINHO_DO_filmcraft-cli]
 
 PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legenda.srt`).
 
@@ -14,6 +14,8 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
   no quadro; horizontal, entra a 100 % no terço de baixo à esquerda.
 - --cor: Lumetri leve (exposição, contraste, saturação, altas luzes, sombras).
 - A legenda vem dos <title> do FCPXML (o `.srt` só se o corte não tiver) e sai gravada na imagem.
+- --legenda-viva: em vez da legenda fixa, a camada animada do `legenda_viva.py` (HyperFrames,
+  palavra falada na caixa creme), renderizada em paralelo e posta na trilha de cima.
 - Exporta H.264 com o chip de vídeo do Mac (`hardwareEncoding: auto`).
 """
 import argparse, glob, json, os, re, subprocess, sys, time, urllib.parse
@@ -76,6 +78,7 @@ def main():
     a.add_argument("--motion-em", type=float, default=0.5)
     a.add_argument("--cor", action="store_true")
     a.add_argument("--sem-legenda", action="store_true")
+    a.add_argument("--legenda-viva", action="store_true")
     a.add_argument("--legenda-tamanho", type=float, default=72.0, help="16x9/4x3, px por 1080 linhas")
     a.add_argument("--cli", default=os.path.join(AQUI, "..", "..", "target", "release", "filmcraft-cli"))
     o = a.parse_args()
@@ -84,6 +87,14 @@ def main():
     if len(xml) != 1:
         sys.exit(f"esperava um .fcpxml em {o.corte}, achei {len(xml)}")
     w, h = TAMANHOS[o.formato]
+    viva = o.legenda_viva and not o.sem_legenda
+    if viva:
+        # renderiza enquanto o FilmCraft monta; no reel, a altura que o corte escolheu (80 %)
+        mov = os.path.abspath(o.saida) + "_legenda.mov"
+        tam, centro = (90, 0.8) if h > w else (round(o.legenda_tamanho * h / 1080), 0.86)
+        legenda = subprocess.Popen([sys.executable, "-I", os.path.join(AQUI, "legenda_viva.py"), o.corte, mov,
+                                    "--largura", str(w), "--altura", str(h), "--tamanho", str(tam), "--centro", str(centro)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     m = Mcp(cli)
     imp = m.run("file.import", {"paths": [os.path.abspath(xml[0])]})
@@ -117,7 +128,7 @@ def main():
         for cid in ids:
             for k, v in COR.items():
                 m.run("effects.setParam", {"clip": cid, "effect": "lumetri", "param": k, "value": v})
-    if not o.sem_legenda:
+    if not o.sem_legenda and not viva:
         # os títulos do FCPXML já entram como trilha de legenda; o .srt só cobre corte sem eles
         trilhas = m.run("captions.list").get("tracks", [])
         trilha = trilhas[0]["id"] if trilhas else None
@@ -139,10 +150,19 @@ def main():
         else:
             m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "scale", "value": 100.0})
             m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "position", "value": [540.0, 240.0 * h / 1080]})
+    if viva:
+        saida, erro = legenda.communicate()
+        if legenda.returncode != 0:
+            sys.exit(f"legenda viva falhou: {erro[-1500:]}")
+        item = m.run("file.import", {"paths": [mov]})["items"][0]
+        m.run("sequence.addTracks", {"video": 1, "audio": 0})
+        trilha = "V3" if o.motion else "V2"
+        lc = m.run("timeline.place", {"item": item, "track": trilha, "seconds": 0.0})["clips"][0]
+        m.run("clip.fitToFrame", {"clips": [lc]})
 
     t = time.time()
     r = m.run("file.exportMedia", {"path": os.path.abspath(o.saida) + ".mp4", "format": "h264", "hardwareEncoding": "auto",
-                                  "width": w, "height": h, "burnCaptions": not o.sem_legenda, "wait": True})
+                                  "width": w, "height": h, "burnCaptions": not o.sem_legenda and not viva, "wait": True})
     m.fechar()
     print(f"exportado em {time.time() - t:.1f} s: {json.dumps(r.get('result', r))}")
 
