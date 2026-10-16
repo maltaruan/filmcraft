@@ -464,6 +464,28 @@ pub(crate) fn visible_layer_rect(m: &Affine, lw: usize, lh: usize, w: usize, h: 
     Some((x0, y0, cw, ch))
 }
 
+/// The part of a decoded `frame` (decimated by `n`) that `motion` places inside the `w`×`h`
+/// output, cut out before it is converted ([`visible_layer_rect`]): the cropped frame, the scale
+/// of the whole decoded layer, and the crop's origin in decoded pixels. None when the crop would
+/// not save enough, or [`VideoFrame::cropped`] could not cut exactly that rectangle.
+fn visible_frame_crop(
+    frame: &VideoFrame,
+    n: usize,
+    src_size: (u32, u32),
+    scale: f32,
+    motion: &Affine,
+    w: usize,
+    h: usize,
+) -> Option<(VideoFrame, f32, usize, usize)> {
+    let (lw, lh) = frame.decimated_size(n);
+    let full_scale = lw as f32 / src_size.0.max(1) as f32;
+    let m = Affine::scale(scale as f64, scale as f64).then_apply(motion).then_apply(&Affine::scale(1.0 / full_scale as f64, 1.0 / full_scale as f64));
+    let (x0, y0, cw, ch) = visible_layer_rect(&m, lw, lh, w, h)?;
+    let region = filmcraft_frame::Region { x: x0.checked_mul(n)?, y: y0.checked_mul(n)?, w: cw.checked_mul(n)?, h: ch.checked_mul(n)? };
+    let part = frame.cropped(region);
+    (part.decimated_size(n) == (cw, ch) && (part.width, part.height) != (frame.width, frame.height)).then_some((part, full_scale, x0, y0))
+}
+
 /// Whether a placement matrix leaves the layer exactly where it is.
 fn identity_placement(m: &Affine) -> bool {
     (m.a - 1.0).abs() < 1e-9 && (m.d - 1.0).abs() < 1e-9 && m.b == 0.0 && m.c == 0.0 && m.e.abs() < 1e-9 && m.f.abs() < 1e-9
@@ -524,14 +546,56 @@ pub(crate) fn item_layer_ex(
         // anything else takes the general path below, with the frame already fetched
         fetched = Some((src, frame, n));
     }
+    // Media whose effects (if any) only look at each pixel's own colour: decode only the part of
+    // the frame that Motion puts inside the output (a vertical clip filling a 16:9 sequence: a
+    // third), with the margin and alignment of the layer crop below.
+    let pointwise_cx = effects::FxCtx {
+        t: mt,
+        px_scale: 1.0,
+        seconds: 0.0,
+        timecode: tc,
+        clip_name: &item.name,
+        project: Some(project),
+        env: None,
+        frame_rate: seq.settings.frame_rate.as_f64(),
+        working: seq.settings.color.working,
+    };
+    let pointwise = !item.has_opacity_masks()
+        && (!opts.effects
+            || item
+                .effects
+                .iter()
+                .filter(|e| e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e))
+                .all(|e| effects::is_pointwise(e, &pointwise_cx)));
+    if fetched.is_none() && pointwise && matches!(pi.kind, ItemKind::Media(_) | ItemKind::Subclip { .. }) {
+        fetched = media_frame(item, t, sources, want, src_size);
+    }
+    // (scale of the whole decoded layer, crop origin) when only part of the frame was decoded
+    let mut visible: Option<(f32, usize, usize)> = None;
     let mut layer = match fetched {
-        Some((src, frame, n)) => media_image(project, seq, item, t, &src, &frame, n, want),
+        Some((src, frame, n)) => {
+            let crop = if pointwise && interpolation_blend(item, t, src.info().frame_rate()).is_none() {
+                visible_frame_crop(&frame, n, src_size, opts.scale, &motion, w, h)
+            } else {
+                None
+            };
+            match crop {
+                Some((part, full_scale, x0, y0)) => {
+                    visible = Some((full_scale, x0, y0));
+                    media_image(project, seq, item, t, &src, &part, n, want)
+                }
+                None => media_image(project, seq, item, t, &src, &frame, n, want),
+            }
+        }
         None => base_layer(project, seq, item, t, opts, sources, want)?,
     };
-    let px_scale = layer.w as f32 / src_size.0.max(1) as f32;
+    let px_scale = visible.map_or(layer.w as f32 / src_size.0.max(1) as f32, |(s, _, _)| s);
     // layer px → source px → sequence px → output px
     let mut m =
         Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion).then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
+    if let Some((_, x0, y0)) = visible {
+        m = m.then_apply(&Affine::translate(x0 as f64, y0 as f64));
+    }
     if opts.effects {
         let cx = effects::FxCtx {
             t: mt,

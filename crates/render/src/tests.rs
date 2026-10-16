@@ -521,3 +521,34 @@ fn a_reversed_clip_shows_exactly_its_source_range() {
     let all: Vec<i64> = (0..20).flat_map(|f| shown(&p, f, false)).collect();
     assert_eq!(all, (10..=29).rev().collect::<Vec<_>>());
 }
+
+/// A 4:2:0 frame filling a landscape output: decoding only the visible crop of the frame gives
+/// the output decoding the whole frame gives, at full size and decimated by 2.
+#[test]
+fn visible_frame_crop_matches_the_whole_frame() {
+    use filmcraft_frame::{Chroma, PixelData};
+    let (fw, fh) = (288u32, 512u32);
+    let luma: Vec<u8> = (0..fw * fh).map(|i| ((i * 7 + (i / fw) * 13) % 251) as u8).collect();
+    let chroma = |k: u32| -> Vec<u8> { (0..(fw / 2) * (fh / 2)).map(|i| (40 + (i * k + (i / (fw / 2)) * 3) % 170) as u8).collect() };
+    let frame = VideoFrame {
+        data: PixelData::Yuv8 { planes: [Arc::new(luma), Arc::new(chroma(5)), Arc::new(chroma(11))], chroma: Chroma::C420, alpha: None },
+        ..VideoFrame::rgba8(fw, fh, vec![0; (fw * fh * 4) as usize])
+    };
+    for (n, (w, h)) in [(1usize, (256usize, 144usize)), (2, (128, 72))] {
+        let (lw, _) = frame.decimated_size(n);
+        // Motion in source pixels: fill the width, centred vertically
+        let k = w as f64 / fw as f64;
+        let motion = Affine::translate(0.0, (h as f64 - fh as f64 * k) / 2.0).then_apply(&Affine::scale(k, k));
+        let full_scale = lw as f32 / fw as f32;
+        let m = motion.then_apply(&Affine::scale(1.0 / full_scale as f64, 1.0 / full_scale as f64));
+        let (iw, ih, px) = frame.to_linear_f32_decimated(n);
+        let want = Image { w: iw, h: ih, px }.transformed(w, h, &m);
+        let (part, scale, x0, y0) = visible_frame_crop(&frame, n, (fw, fh), 1.0, &motion, w, h).expect("a crop of a filled frame");
+        assert!((scale - full_scale).abs() < 1e-6);
+        assert!(part.height < frame.height, "n={n}: crop {}x{}", part.width, part.height);
+        let (pw, ph, ppx) = part.to_linear_f32_decimated(n);
+        let got = Image { w: pw, h: ph, px: ppx }.transformed(w, h, &m.then_apply(&Affine::translate(x0 as f64, y0 as f64)));
+        let diff = want.px.iter().zip(&got.px).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(diff <= 1e-5, "n={n}: max diff {diff:.2e}");
+    }
+}
