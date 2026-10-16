@@ -14,7 +14,8 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
 - --motion: clipe com transparência (ex.: HyperFrames `--format mov`) na V2. Vertical, encaixa
   no quadro; horizontal, entra a 100 % no terço de baixo à esquerda.
 - Log da Sony (S-Log2 / S-Log3, lido do XML do vídeo de origem): `../cor/log_709.py --auto` gera a
-  LUT de entrada do corte (exposição medida na pele, LUT oficial da Sony, `--sabor` escolhe qual) e
+  LUT de entrada do corte (modo neutro: o tratamento do Ruan medido, branco neutralizado, exposição
+  pela pele; `--sabor` troca pela LUT oficial da Sony) e
   ela entra no Lumetri de cada trecho, na placa de vídeo. --sem-log desliga.
 - --cor: Lumetri leve (exposição, contraste, saturação, altas luzes, sombras); em log fica de fora
   salvo se pedido, porque a conversão já entrega a imagem pronta.
@@ -109,10 +110,11 @@ def converter_log(video, corte, sabor, trechos=None):
     d = json.loads(subprocess.run([sys.executable, "-I", cor, "--detectar", video], capture_output=True, text=True, check=True).stdout)
     if not d.get("curva"):
         return None
-    cube = os.path.join(corte, f"log_709_{sabor}.cube")
+    cube = os.path.join(corte, f"log_709_{sabor or 'neutro'}.cube")
     if not os.path.exists(cube):
         extra = ["--intervalos", trechos] if trechos else []
-        r = subprocess.run([sys.executable, "-I", cor, cube, "--auto", video, "--sabor", sabor, *extra], capture_output=True, text=True)
+        modo = ["--modo", "sony", "--sabor", sabor] if sabor else ["--modo", "neutro"]
+        r = subprocess.run([sys.executable, "-I", cor, cube, "--auto", video, *modo, *extra], capture_output=True, text=True)
         if r.returncode != 0:
             sys.exit(f"conversão do log falhou: {r.stderr[-1500:]}")
         print(f"log: {r.stdout.strip()}", file=sys.stderr)
@@ -231,7 +233,7 @@ def main():
     a.add_argument("--musica")
     a.add_argument("--musica-db", type=float, default=-18.0, help="nível da música sem fala")
     a.add_argument("--sem-voz", action="store_true")
-    a.add_argument("--sabor", default="LC-709", help="LUT oficial da Sony na conversão do log")
+    a.add_argument("--sabor", help="converter o log pela LUT oficial da Sony (LC-709, LC-709TypeA...) em vez do modo neutro")
     a.add_argument("--sem-log", action="store_true")
     a.add_argument("--lufs", type=float, default=-14.0)
     a.add_argument("--legenda-tamanho", type=float, default=72.0, help="16x9/4x3, px por 1080 linhas")

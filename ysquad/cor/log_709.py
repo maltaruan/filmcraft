@@ -1,5 +1,8 @@
 """S-Log da Sony -> Rec.709: uma LUT de entrada por clipe, com a exposição corrigida em luz de cena.
 
+Dois modos. `neutro` (padrão) é o tratamento do Ruan medido: branco neutralizado, a curva de tom e a
+saturação que ele usava à mão no Resolve, sem visual de LUT. `sony` passa pela LUT oficial da Sony.
+
 Uso:
     python3 -I log_709.py SAIDA.cube --curva slog3|slog2 --gama sgamut3|sgamut3cine|sgamut
         [--exposicao -2.5] [--ganhos 1,1,1] [--lut LUT_DA_SONY.cube] [--n 65]
@@ -20,9 +23,10 @@ Fontes: S-Log3 e S-Gamut3/.Cine, "Technical Summary for S-Gamut3.Cine/S-Log3 and
 """
 import argparse, json, math, os, re, statistics, subprocess, sys, tempfile
 
-# Luma (8 bits, Rec.709) da pele nos vídeos do Ruan já tratados: medido em 16/10/2026 no
-# sony4k_60s (testa 187, bochechas 167 e 174, nariz 184). A exposição automática mira o meio.
-PELE_ALVO = 177.0
+# Luma (8 bits, Rec.709) da pele no tratamento à mão do Ruan: medido em 16/10/2026 no `discord.mov`
+# (exportado do Resolve, bruto C0204), mesmo método da exposição automática (Vision, janela central do
+# rosto, mediana de 9 quadros): 99,7. O sony4k_60s dava 158, mas a origem dele não está confirmada.
+PELE_ALVO = 100.0
 ROSTO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rosto")
 
 RESOLVE = "/Library/Application Support/Blackmagic Design/DaVinci Resolve/LUT"
@@ -38,6 +42,32 @@ SABORES = {
 }
 # a gama que cada LUT oficial espera na entrada
 GAMA_DA_LUT = {"slog3": "sgamut3cine", "slog2": "sgamut"}
+
+
+# O tratamento à mão do Ruan no Resolve, medido em 16/10/2026: 5 quadros do `discord.mov`
+# (exportado) alinhados ao bruto `C0204` (S-Log2, correlação 0,996), modelo ajustado com erro de
+# 3,8 níveis em 8 bits. Curva: log2 da luminância de cena (Rec.709, exposição do bruto) -> valor de
+# tela (0-255, gama 2.4). Acima de +2,08 quase não havia pixel: o ombro continua a inclinação medida
+# (31 níveis por ponto) até o branco. Saturação +11 %. Nas superfícies claras quase neutras ele
+# deixava azul/vermelho em 0,986 (o branco da câmera dava 0,908): branco neutralizado por inteiro.
+CURVA_RUAN = [(-5.308, 0.0), (-4.385, 10.7), (-3.462, 23.0), (-2.538, 37.8), (-1.615, 54.0), (-0.692, 72.2),
+              (0.231, 95.5), (1.154, 122.3), (2.077, 151.2)]
+SATURACAO_RUAN = 1.11
+
+
+def tom_ruan(lg):
+    """Valor de tela (0-1, gama 2.4) para log2 da luminância de cena."""
+    xs = CURVA_RUAN
+    if lg <= xs[0][0]:
+        return 0.0
+    if lg >= xs[-1][0]:
+        x1, y1 = xs[-1]
+        inclin = (y1 - xs[-2][1]) / (x1 - xs[-2][0])
+        k = inclin / (255.0 - y1)
+        return (y1 + (255.0 - y1) * (1.0 - math.exp(-(lg - x1) * k))) / 255.0
+    for (x0, y0), (x1, y1) in zip(xs, xs[1:]):
+        if lg <= x1:
+            return (y0 + (y1 - y0) * (lg - x0) / (x1 - x0)) / 255.0
 
 
 # ---------- curvas (x = código / 1023, linear = refletância de cena, cinza 18 % = 0,18)
@@ -84,6 +114,7 @@ PRIMARIAS = {
     "sgamut": ((0.730, 0.280), (0.140, 0.855), (0.100, -0.050)),
     "sgamut3": ((0.730, 0.280), (0.140, 0.855), (0.100, -0.050)),
     "sgamut3cine": ((0.766, 0.275), (0.225, 0.800), (0.089, -0.087)),
+    "rec709": ((0.64, 0.33), (0.30, 0.60), (0.15, 0.06)),
 }
 D65 = (0.3127, 0.3290)
 
@@ -158,6 +189,26 @@ def conversao(curva, gama, exposicao=0.0, ganhos=(1.0, 1.0, 1.0), lut=None):
     return f
 
 
+def conversao_neutra(curva, gama, exposicao=0.0, ganhos=(1.0, 1.0, 1.0)):
+    """Sinal -> Rec.709 sem LUT: luz de cena, exposição, matriz pra Rec.709, branco (ganhos em
+    Rec.709 linear), a curva de tom do Ruan na luminância (a cor segue como razão) e a saturação dele."""
+    dec, _ = CURVAS[curva]
+    mt = matriz(gama, "rec709")
+    k = 2.0 ** exposicao
+    def f(s):
+        lin = [dec(s[q]) * k for q in range(3)]
+        v = [max(sum(mt[i][j] * lin[j] for j in range(3)) * ganhos[i], 0.0) for i in range(3)]
+        lum = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]
+        if lum <= 1e-7:
+            return (0.0, 0.0, 0.0)
+        tela = tom_ruan(math.log2(lum)) ** 2.4
+        out = [x * tela / lum for x in v]
+        l2 = 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2]
+        out = [l2 + (x - l2) * SATURACAO_RUAN for x in out]
+        return tuple(min(max(x, 0.0), 1.0) ** (1 / 2.4) for x in out)
+    return f
+
+
 def escrever_cube(caminho, f, n, titulo):
     m = n - 1
     with open(caminho, "w") as o:
@@ -203,7 +254,7 @@ def amostras_de_pele(video, n=5, largura=960, intervalos=None):
             alvo -= b - a
         return faixas[-1][1]
 
-    pele = []
+    pele, neutros = [], []
     with tempfile.TemporaryDirectory() as tmp:
         for i in range(n):
             t = instante(i)
@@ -213,12 +264,14 @@ def amostras_de_pele(video, n=5, largura=960, intervalos=None):
             dims = subprocess.run([ffmpeg, "-loglevel", "error", "-y", "-ss", f"{t:.2f}", "-i", video, "-frames:v", "1", "-vf", vf,
                                    "-f", "rawvideo", "-pix_fmt", "rgb24", raw], capture_output=True, text=True)
             out = subprocess.run([exe, png], capture_output=True, text=True).stdout.split("\t")
-            if len(out) < 4:
-                continue
-            cx, cy, fh = float(out[1]), float(out[2]), float(out[3])
             b = open(raw, "rb").read()
             W = largura
             H = len(b) // (3 * W)
+            rosto = None if len(out) < 4 else (float(out[1]), float(out[2]), float(out[3]))
+            neutros.append((b, W, H, rosto))
+            if not rosto:
+                continue
+            cx, cy, fh = rosto
             x0, x1 = int((cx - 0.18 * fh * H / W) * W), int((cx + 0.18 * fh * H / W) * W)
             y0, y1 = int((cy - 0.12 * fh) * H), int((cy + 0.08 * fh) * H)
             px = [tuple(b[(y * W + x) * 3 + q] for q in range(3)) for y in range(max(y0, 0), min(y1, H)) for x in range(max(x0, 0), min(x1, W))]
@@ -226,16 +279,55 @@ def amostras_de_pele(video, n=5, largura=960, intervalos=None):
                 pele.append(tuple(statistics.median(p[q] for p in px) / 255.0 for q in range(3)))
     if not pele:
         return None
-    return tuple(statistics.median(p[q] for p in pele) for q in range(3)), len(pele)
+    return tuple(statistics.median(p[q] for p in pele) for q in range(3)), len(pele), neutros
 
 
-def exposicao_pela_pele(curva, gama, pele, lut=None, alvo=PELE_ALVO):
+def branco_auto(quadros, curva, gama):
+    """Ganhos (Rec.709 linear) que deixam neutras as áreas claras e de pouca cor fora do rosto
+    (paredes, estante): mediana por canal dessas áreas em cada quadro, mediana entre quadros."""
+    dec, _ = CURVAS[curva]
+    mt = matriz(gama, "rec709")
+    tab = [dec(i / 255.0) for i in range(256)]
+    estimativas = []
+    for b, W, H, rosto in quadros:
+        px = []
+        for y in range(0, H, 4):
+            for x in range(0, W, 4):
+                if rosto:
+                    cx, cy, fh = rosto
+                    if abs(x / W - cx) < 0.45 * fh * H / W and -0.35 * fh < y / H - cy < 1.2 * fh:
+                        continue  # rosto e pescoço
+                k = (y * W + x) * 3
+                s = b[k:k + 3]
+                if max(s) > 247:
+                    continue
+                lin = [tab[s[0]], tab[s[1]], tab[s[2]]]
+                v = [sum(mt[i][j] * lin[j] for j in range(3)) for i in range(3)]
+                if min(v) <= 0:
+                    continue
+                px.append(v)
+        if len(px) < 200:
+            continue
+        lums = sorted(0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2] for v in px)
+        lo, hi = lums[len(lums) // 2], lums[int(len(lums) * 0.97)]
+        cand = [v for v in px if lo <= 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2] <= hi and (max(v) - min(v)) / max(v) < 0.35]
+        if len(cand) < 100:
+            continue
+        m = [statistics.median(v[q] for v in cand) for q in range(3)]
+        estimativas.append((m[1] / m[0], m[1] / m[2]))
+    if not estimativas:
+        return (1.0, 1.0, 1.0)
+    return (round(statistics.median(e[0] for e in estimativas), 4), 1.0, round(statistics.median(e[1] for e in estimativas), 4))
+
+
+def exposicao_pela_pele(curva, gama, pele, lut=None, alvo=PELE_ALVO, modo="sony", ganhos=(1, 1, 1)):
     """Pontos de luz (em luz de cena) que levam a pele medida ao alvo depois da conversão."""
     luma = lambda c: 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    conv = (lambda ev: conversao_neutra(curva, gama, ev, ganhos)) if modo == "neutro" else (lambda ev: conversao(curva, gama, ev, ganhos, lut))
     lo, hi = -8.0, 4.0
     for _ in range(30):
         mid = (lo + hi) / 2
-        if luma(conversao(curva, gama, mid, (1, 1, 1), lut)(pele)) * 255 > alvo:
+        if luma(conv(mid)(pele)) * 255 > alvo:
             hi = mid
         else:
             lo = mid
@@ -282,7 +374,8 @@ def main():
     a.add_argument("--trecho", metavar="VIDEO", help="--auto: medir a pele neste vídeo (padrão: o próprio VIDEO)")
     a.add_argument("--intervalos", help="com --auto: medir a pele só nestes trechos do vídeo (a-b,c-d, segundos)")
     a.add_argument("--amostras", metavar="PASTA", help="com --auto: os quatro sabores da Sony lado a lado, pra escolher")
-    a.add_argument("--sabor", help="com --auto: LC-709 (padrão), LC-709TypeA, Cine+709 ou SLog2-709")
+    a.add_argument("--sabor", help="modo sony: LC-709 (padrão), LC-709TypeA, Cine+709 ou SLog2-709")
+    a.add_argument("--modo", choices=("neutro", "sony"), default="neutro")
     a.add_argument("--curva", choices=CURVAS)
     a.add_argument("--gama", choices=PRIMARIAS)
     a.add_argument("--exposicao", type=float, default=0.0, help="pontos de luz, em luz de cena")
@@ -307,14 +400,17 @@ def main():
         iv = [tuple(map(float, x.split("-"))) for x in o.intervalos.split(",")] if o.intervalos else None
         r = amostras_de_pele(o.trecho or o.auto, intervalos=iv)
         if r:
-            medida = {"pele_sinal": [round(v, 4) for v in r[0]], "quadros_com_rosto": r[1]}
-            o.exposicao = exposicao_pela_pele(o.curva, o.gama, r[0], o.lut)
+            if o.modo == "neutro":
+                o.ganhos = ",".join(map(str, branco_auto(r[2], o.curva, o.gama)))
+            g = tuple(float(x) for x in o.ganhos.split(","))
+            medida = {"pele_sinal": [round(v, 4) for v in r[0]], "quadros_com_rosto": r[1], "ganhos_branco": g}
+            o.exposicao = exposicao_pela_pele(o.curva, o.gama, r[0], o.lut, modo=o.modo, ganhos=g)
     if not (o.saida and o.curva and o.gama):
         a.error("SAIDA, --curva e --gama")
     ganhos = tuple(float(x) for x in o.ganhos.split(","))
-    f = conversao(o.curva, o.gama, o.exposicao, ganhos, o.lut)
-    escrever_cube(o.saida, f, o.n, f"{o.curva}/{o.gama} exp {o.exposicao:+.2f}")
-    print(json.dumps({"saida": o.saida, "curva": o.curva, "gama": o.gama, "exposicao": o.exposicao, "medida": medida}))
+    f = conversao_neutra(o.curva, o.gama, o.exposicao, ganhos) if o.modo == "neutro" else conversao(o.curva, o.gama, o.exposicao, ganhos, o.lut)
+    escrever_cube(o.saida, f, o.n, f"{o.modo} {o.curva}/{o.gama} exp {o.exposicao:+.2f}")
+    print(json.dumps({"saida": o.saida, "modo": o.modo, "curva": o.curva, "gama": o.gama, "exposicao": o.exposicao, "medida": medida}))
 
 
 if __name__ == "__main__":
