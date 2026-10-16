@@ -665,23 +665,37 @@ fn crop_plane<T: Copy + Default>(src: &[T], w: usize, h: usize, n: usize, r: Reg
 }
 
 /// A `w`×`h` plane of `n`-element pixels turned clockwise by `q` (1–3) quarter turns.
+///
+/// Works in 64×64 tiles of the output: a quarter turn reads the source down its columns, and a
+/// tile keeps those reads within a few dozen source rows instead of striding through the whole
+/// plane for every output pixel (a 4K frame per row otherwise misses the cache on each read).
 fn rotate_plane<T: Copy + Default + Send + Sync>(src: &[T], w: usize, h: usize, n: usize, q: u8) -> Vec<T> {
+    const TILE: usize = 64;
     let mut out = vec![T::default(); w * h * n];
     if w == 0 || h == 0 || src.len() < w * h * n {
         return out;
     }
     // output width: h for a quarter / three-quarter turn
     let ow = if q % 2 == 1 { h } else { w };
-    out.par_chunks_mut(ow * n).enumerate().for_each(|(oy, row)| {
-        for ox in 0..ow {
-            // the source pixel shown at (ox, oy)
-            let (x, y) = match q {
-                1 => (oy, h - 1 - ox),
-                2 => (w - 1 - ox, h - 1 - oy),
-                _ => (w - 1 - oy, ox),
-            };
-            let s = (y * w + x) * n;
-            row[ox * n..ox * n + n].copy_from_slice(&src[s..s + n]);
+    out.par_chunks_mut(ow * n * TILE).enumerate().for_each(|(band, rows)| {
+        let oy0 = band * TILE;
+        for ox0 in (0..ow).step_by(TILE) {
+            let ox1 = (ox0 + TILE).min(ow);
+            for (dy, row) in rows.chunks_mut(ow * n).enumerate() {
+                let oy = oy0 + dy;
+                for ox in ox0..ox1 {
+                    // the source pixel shown at (ox, oy)
+                    let (x, y) = match q {
+                        1 => (oy, h - 1 - ox),
+                        2 => (w - 1 - ox, h - 1 - oy),
+                        _ => (w - 1 - oy, ox),
+                    };
+                    let s = (y * w + x) * n;
+                    if let (Some(d), Some(p)) = (row.get_mut(ox * n..ox * n + n), src.get(s..s + n)) {
+                        d.copy_from_slice(p);
+                    }
+                }
+            }
         }
     });
     out
@@ -769,6 +783,34 @@ mod tests {
         let c = short.cropped(Region { x: 2, y: 2, w: 2, h: 2 });
         let PixelData::Yuv8 { planes, .. } = &c.data else { panic!() };
         assert_eq!(*planes[0], [0, 0, 0, 0]);
+    }
+
+    /// The tiled turn gives what the per-pixel definition gives, on planes larger than a tile
+    /// and not a multiple of it, for 1- and 4-element pixels.
+    #[test]
+    fn tiled_rotation_matches_the_pixel_definition() {
+        for (w, h, n) in [(150usize, 97usize, 1usize), (65, 130, 4), (1, 70, 1)] {
+            let src: Vec<u16> = (0..w * h * n).map(|i| (i % 65_521) as u16).collect();
+            for q in 1..=3u8 {
+                let got = rotate_plane(&src, w, h, n, q);
+                let ow = if q % 2 == 1 { h } else { w };
+                let oh = w * h / ow;
+                let mut want = vec![0u16; w * h * n];
+                for oy in 0..oh {
+                    for ox in 0..ow {
+                        let (x, y) = match q {
+                            1 => (oy, h - 1 - ox),
+                            2 => (w - 1 - ox, h - 1 - oy),
+                            _ => (w - 1 - oy, ox),
+                        };
+                        for k in 0..n {
+                            want[(oy * ow + ox) * n + k] = src[(y * w + x) * n + k];
+                        }
+                    }
+                }
+                assert!(got == want, "{w}x{h}x{n} q={q}");
+            }
+        }
     }
 
     #[test]
