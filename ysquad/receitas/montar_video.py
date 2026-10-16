@@ -3,7 +3,7 @@
 Uso:
     python3 -I montar_video.py PASTA_DO_CORTE SAIDA_SEM_EXTENSAO
         [--formato 9x16|16x9|4x3] [--motion CLIPE.mov --motion-em 0.5]
-        [--cor] [--sem-legenda] [--cli CAMINHO_DO_filmcraft-cli]
+        [--cor] [--sem-legenda] [--legenda-tamanho 72] [--cli CAMINHO_DO_filmcraft-cli]
 
 PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legenda.srt`).
 
@@ -76,6 +76,7 @@ def main():
     a.add_argument("--motion-em", type=float, default=0.5)
     a.add_argument("--cor", action="store_true")
     a.add_argument("--sem-legenda", action="store_true")
+    a.add_argument("--legenda-tamanho", type=float, default=72.0, help="16x9/4x3, px por 1080 linhas")
     a.add_argument("--cli", default=os.path.join(AQUI, "..", "..", "target", "release", "filmcraft-cli"))
     o = a.parse_args()
     cli = os.path.abspath(o.cli)
@@ -119,7 +120,10 @@ def main():
     if not o.sem_legenda:
         srt = os.path.join(o.corte, "legenda.srt")
         if os.path.exists(srt):
-            m.run("captions.import", {"path": srt})
+            leg = m.run("captions.import", {"path": srt})
+            if h < w:
+                # o tamanho é por 1080 linhas: no horizontal o padrão (54) some no quadro largo
+                m.run("captions.setStyle", {"track": leg["track"], "size": o.legenda_tamanho})
     if o.motion:
         item = m.run("file.import", {"paths": [os.path.abspath(o.motion)]})["items"][0]
         m.run("sequence.addTracks", {"video": 1, "audio": 0})
@@ -128,7 +132,7 @@ def main():
             m.run("clip.fitToFrame", {"clips": [mc]})
         else:
             m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "scale", "value": 100.0})
-            m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "position", "value": [540.0, 420.0 * h / 1080]})
+            m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "position", "value": [540.0, 240.0 * h / 1080]})
 
     t = time.time()
     r = m.run("file.exportMedia", {"path": os.path.abspath(o.saida) + ".mp4", "format": "h264", "hardwareEncoding": "auto",
