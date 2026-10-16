@@ -31,7 +31,8 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
 - Voz (padrão, --sem-voz desliga): Essential Sound de diálogo com limpeza leve (ruído, sala,
   graves de manuseio, compressor, EQ "Balanced Voice"). --musica entra na A2 como música, abaixando
   sozinha sob a fala (ducking). A exportação normaliza o volume pra --lufs (-14, Instagram e YouTube).
-- Exporta H.264 com o chip de vídeo do Mac (`hardwareEncoding: auto`).
+- Exporta H.264 com o chip de vídeo do Mac (`hardwareEncoding: auto`), compondo na placa de vídeo
+  (`gpuRendering: auto`; o que ela não faz cai sozinho no processador).
 """
 import argparse, glob, json, os, re, subprocess, sys, time, urllib.parse
 
@@ -297,7 +298,7 @@ def main():
         m.run("clip.fitToFrame", {"clips": [lc]})
 
     t = time.time()
-    r = m.run("file.exportMedia", {"path": os.path.abspath(o.saida) + ".mp4", "format": "h264", "hardwareEncoding": "auto",
+    r = m.run("file.exportMedia", {"path": os.path.abspath(o.saida) + ".mp4", "format": "h264", "hardwareEncoding": "auto", "gpuRendering": "auto",
                                   "width": w, "height": h, "burnCaptions": not o.sem_legenda and not viva,
                                   "loudnessLufs": o.lufs, "wait": True})
     m.fechar()

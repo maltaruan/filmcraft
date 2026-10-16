@@ -34,5 +34,11 @@ filmcraft-automation = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
+# filmcraft-gpu asks wgpu for no backend (the app gets Metal through eframe): a CLI built on its
+# own (cargo build -p filmcraft-cli) had no GPU, so headless / MCP exports with GPU rendering
+# Auto always fell back to the CPU.
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["metal"] }
+
 [dev-dependencies]
 filmcraft-testkit = { workspace = true }
