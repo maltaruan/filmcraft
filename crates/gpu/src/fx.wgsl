@@ -17,7 +17,7 @@ struct U {
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var dst: texture_storage_2d<rgba32float, write>;
-// Unsharp Mask: the image before blurring.
+// Unsharp Mask: the image before blurring. Colour table (OP_LUT3): n² × n texels, see `lut3`.
 @group(0) @binding(3) var aux: texture_2d<f32>;
 
 const OP_BRIGHTNESS_CONTRAST: u32 = 1u;
@@ -50,6 +50,7 @@ const OP_MIRROR: u32 = 28u;
 const OP_OFFSET: u32 = 29u;
 const OP_VIDEO_LIMITER: u32 = 30u;
 const OP_LUMETRI: u32 = 31u;
+const OP_LUT3: u32 = 32u;
 
 fn size() -> vec2<i32> {
     return vec2<i32>(i32(u.i0.y), i32(u.i0.z));
@@ -530,6 +531,25 @@ fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
     return dec(v);
 }
 
+// A colour table (`Lut3`): trilinear in the encoded cube, as `Lut3::sample` on the CPU.
+fn lut_at(r: i32, g: i32, b: i32, n: i32) -> vec3<f32> {
+    return textureLoad(aux, vec2<i32>(r + b * n, g), 0).rgb;
+}
+
+fn lut3(c: vec3<f32>) -> vec3<f32> {
+    let n = i32(u.i1.x);
+    let m = f32(n - 1);
+    let e = clamp(enc(c), vec3(0.0), vec3(1.0)) * m;
+    let i0 = min(vec3<i32>(floor(e)), vec3(n - 1));
+    let i1 = min(i0 + vec3(1), vec3(n - 1));
+    let t = e - vec3<f32>(i0);
+    let c00 = mix(lut_at(i0.x, i0.y, i0.z, n), lut_at(i1.x, i0.y, i0.z, n), t.x);
+    let c10 = mix(lut_at(i0.x, i1.y, i0.z, n), lut_at(i1.x, i1.y, i0.z, n), t.x);
+    let c01 = mix(lut_at(i0.x, i0.y, i1.z, n), lut_at(i1.x, i0.y, i1.z, n), t.x);
+    let c11 = mix(lut_at(i0.x, i1.y, i1.z, n), lut_at(i1.x, i1.y, i1.z, n), t.x);
+    return mix(mix(c00, c10, t.y), mix(c01, c11, t.y), t.z);
+}
+
 // One output pixel of every op but the running-sum box blur.
 fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
     let s = size();
@@ -714,6 +734,14 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
             let c = o.rgb / a;
             let res = lumetri_op(c, p);
             return vec4(res * a, a);
+        }
+        case OP_LUT3: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            return vec4(lut3(o.rgb / a) * a, a);
         }
         default: {
             let o = ld(p);

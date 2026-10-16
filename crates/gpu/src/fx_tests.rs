@@ -516,62 +516,96 @@ fn hostile_parameters_are_bounded() {
 #[test]
 fn lumetri_unsupported_sections_fall_back() {
     let (w, h) = (40usize, 24usize);
+    let falls_back = |e: &EffectInstance, cx: &FxCtx| FxOp::eval(e, cx, w, h).is_some_and(|o| !o.gpu_ok());
+    let c = cx(Tick::ZERO, 1.0);
     // sharpen > 0 and input LUT (explicitly required by brief)
-    let e = effect("lumetri", &[("sharpen", fl(10.0)), ("input_lut", ParamValue::Text("custom.cube".into()))]);
-    let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()), "sharpen > 0 and input_lut must fall back to CPU");
-
-    // sharpen alone
-    let e = effect("lumetri", &[("sharpen", fl(20.0))]);
-    let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
-
-    // input_lut alone
-    let e = effect("lumetri", &[("input_lut", ParamValue::Text("test.cube".into()))]);
-    let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
-
-    // look_lut
-    let e = effect("lumetri", &[("look_lut", ParamValue::Text("look.cube".into()))]);
-    let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
-
-    // look > 0
-    let e = effect("lumetri", &[("look", ch(1))]);
-    let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
-
-    // curve_luma modified
-    let e = effect("lumetri", &[("curve_luma", ParamValue::Curve(vec![[0.0, 0.1], [1.0, 0.9]]))]);
-    let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
-
-    // hue_vs_sat non-empty
-    let e = effect("lumetri", &[("hue_vs_sat", ParamValue::Curve(vec![[0.5, 0.5]]))]);
-    let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
-
-    // wheel offset
-    let e = effect("lumetri", &[("wheel_shadows", pt(0.5, 0.0))]);
-    let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
-
-    // wheel lightness
-    let e = effect("lumetri", &[("wheel_midtones_l", fl(20.0))]);
-    let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
-
-    // HSL secondary on
-    let e = effect("lumetri", &[("hsl_on", ParamValue::Bool(true))]);
-    let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
-
+    assert!(falls_back(&effect("lumetri", &[("sharpen", fl(10.0)), ("input_lut", ParamValue::Text("custom.cube".into()))]), &c));
+    assert!(falls_back(&effect("lumetri", &[("sharpen", fl(20.0))]), &c));
+    assert!(falls_back(&effect("lumetri", &[("input_lut", ParamValue::Text("test.cube".into()))]), &c));
+    // HSL Secondary whose mask is denoised or blurred looks at neighbours: no colour table
+    assert!(falls_back(&effect("lumetri", &[("hsl_on", ParamValue::Bool(true)), ("hsl_denoise", fl(30.0))]), &c));
+    assert!(falls_back(&effect("lumetri", &[("hsl_on", ParamValue::Bool(true)), ("hsl_blur", fl(30.0))]), &c));
     // HDR working space
-    let e = effect("lumetri", &[]);
     let mut cx_hdr = cx(Tick::ZERO, 1.0);
     cx_hdr.working = filmcraft_color::WorkingSpace::Rec2100Pq;
-    let op = FxOp::eval(&e, &cx_hdr, w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
+    assert!(falls_back(&effect("lumetri", &[]), &cx_hdr));
+}
+
+/// The per-pixel sections after Basic (look, look LUT, curves, wheels, HSL) go to the GPU as a
+/// colour table instead of sending the layer to the CPU.
+#[test]
+fn lumetri_per_pixel_sections_bake_a_table() {
+    let (w, h) = (40usize, 24usize);
+    let c = cx(Tick::ZERO, 1.0);
+    for (i, e) in [
+        effect("lumetri", &[("look_lut", ParamValue::Text("look.cube".into()))]),
+        effect("lumetri", &[("look", ch(1))]),
+        effect("lumetri", &[("curve_luma", ParamValue::Curve(vec![[0.0, 0.1], [1.0, 0.9]]))]),
+        effect("lumetri", &[("hue_vs_sat", ParamValue::Curve(vec![[0.5, 0.5]]))]),
+        effect("lumetri", &[("wheel_shadows", pt(0.5, 0.0))]),
+        effect("lumetri", &[("wheel_midtones_l", fl(20.0))]),
+        effect("lumetri", &[("hsl_on", ParamValue::Bool(true))]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let op = FxOp::eval(&e, &c, w, h).expect("lumetri op");
+        assert!(op.gpu_ok() && op.has_lut(), "case {i}: expected a GPU op with a colour table");
+    }
+    // nothing to bake: no table
+    let op = FxOp::eval(&effect("lumetri", &[("exposure", fl(0.5))]), &c, w, h).expect("lumetri op");
+    assert!(op.gpu_ok() && !op.has_lut());
+}
+
+/// A graded layer through the colour table (GPU) against the exact CPU stages of Lumetri: the
+/// worst pixel stays within one 8-bit level of the encoded signal (65³ trilinear; measured
+/// 2026-10-16 on an M4: S-curve 0.07, HSL 0.36, all 0.46, look 0.57, strong wheels 0.94).
+#[test]
+fn lumetri_tables_match_the_exact_cpu_stages() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut comp = GpuCompositor::new(&dev, &q);
+    let (w, h) = (67u32, 41u32);
+    let px = picture(w, h);
+    let frame = VideoFrame::rgba_f32(w, h, px.clone());
+    let c = cx(Tick::ZERO, 1.0);
+    let s_curve = ParamValue::Curve(vec![[0.0, 0.03], [0.25, 0.2], [0.75, 0.82], [1.0, 0.97]]);
+    let cases = [
+        ("s-curve", effect("lumetri", &[("contrast", fl(15.0)), ("curve_luma", s_curve.clone())])),
+        ("wheels", effect("lumetri", &[("wheel_shadows", pt(-0.3, -0.2)), ("wheel_highlights", pt(0.25, 0.15)), ("wheel_midtones_l", fl(10.0))])),
+        ("hsl", effect("lumetri", &[("hsl_on", ParamValue::Bool(true)), ("hsl_hue", fl(25.0)), ("hsl_hue_range", fl(30.0)), ("hsl_sat", fl(80.0))])),
+        ("look", effect("lumetri", &[("look", ch(1)), ("vignette_amount", fl(-1.5))])),
+        ("all", effect("lumetri", &[("exposure", fl(0.3)), ("curve_luma", s_curve), ("wheel_shadows", pt(-0.2, -0.1)), ("hsl_on", ParamValue::Bool(true))])),
+    ];
+    let enc = |v: f32| filmcraft_color::linear_to_srgb(v.max(0.0));
+    let mut failures = Vec::new();
+    for (name, e) in cases {
+        let op = FxOp::eval(&e, &c, w as usize, h as usize).expect("lumetri op");
+        assert!(op.gpu_ok() && op.has_lut(), "{name}");
+        let mut exact = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
+        filmcraft_render::effects::apply(&mut exact, &e, &c);
+        // the CPU reference of the op (the table) and the GPU agree as closely as other ops
+        let mut reference = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
+        op.apply(&mut reference);
+        let fx = LayerFx { size: (w, h), decimation: 1, ops: vec![op] };
+        let (_, _, gpu) = comp.effect_image(&frame, &fx).expect("effect image");
+        let (worst, _) = compare(&reference.px, &gpu);
+        let mut level = 0.0f32;
+        for (a, b) in exact.px.as_chunks::<4>().0.iter().zip(gpu.as_chunks::<4>().0) {
+            if a[3] > 1e-3 {
+                for k in 0..3 {
+                    level = level.max((enc(a[k] / a[3]).min(1.0) - enc(b[k] / b[3].max(1e-6)).min(1.0)).abs() * 255.0);
+                }
+            }
+        }
+        eprintln!("{name}: GPU vs table reference {worst:.2e}; vs exact CPU {level:.3} levels (8-bit)");
+        if worst > EXACT || level > 1.0 {
+            failures.push(format!("{name}: reference {worst:.2e}, exact {level:.3} levels"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Layers with effect chains in a composited plan — YUV and RGBA sources, a decimated working

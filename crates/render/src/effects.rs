@@ -120,7 +120,7 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
         return;
     }
     // effects with a GPU implementation: evaluated parameters + CPU reference (`gpufx`)
-    if let Some(op) = crate::gpufx::FxOp::eval(e, cx, img.w, img.h).filter(|op| e.effect != "lumetri" || op.gpu_ok()) {
+    if let Some(op) = crate::gpufx::FxOp::eval(e, cx, img.w, img.h).filter(|op| e.effect != "lumetri" || (op.gpu_ok() && !op.has_lut())) {
         op.apply(img);
         return;
     }
@@ -1129,6 +1129,46 @@ pub fn apply_look(look: u32, c: [f32; 3]) -> [f32; 3] {
         8 => [c[0] * 0.75, c[1] * 0.85, c[2] * 1.15].map(|v| v * 0.8),
         _ => c,
     }
+}
+
+/// Grid points per axis of the Lumetri colour table (65³: the step of a 10-bit LUT file's
+/// common size, small enough to build in a few ms and to upload once).
+const POST_LUT_N: usize = 65;
+
+/// Lumetri's per-pixel stages after the basic one (curves, wheels, look / look LUT, HSL Secondary
+/// without its spatial Denoise / Blur) as a 3-D table for the GPU: the exact CPU stages run on
+/// every grid colour. Cached by the effect's settings (and the time, when anything is keyframed),
+/// so a clip builds it once.
+pub(crate) fn lumetri_post_lut(e: &EffectInstance, cx: &FxCtx) -> std::sync::Arc<crate::gpufx::Lut3> {
+    use std::hash::{Hash, Hasher};
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<crate::gpufx::Lut3>>>> = std::sync::OnceLock::new();
+    let mut hs = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(e).unwrap_or_default().hash(&mut hs);
+    if e.params.values().any(|p| p.is_animated()) {
+        cx.t.0.hash(&mut hs);
+    }
+    let id = hs.finish();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(l) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&id) {
+        return l.clone();
+    }
+    let n = POST_LUT_N;
+    let m = (n - 1) as f32;
+    let mut img = Image::new(n * n * n, 1);
+    for (i, px) in img.px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let c = dec([(i % n) as f32 / m, ((i / n) % n) as f32 / m, (i / (n * n)) as f32 / m]);
+        *px = [c[0], c[1], c[2], 1.0];
+    }
+    lumetri_advanced(&mut img, e, cx);
+    hsl_secondary(&mut img, e, cx);
+    let data = img.px.as_chunks::<4>().0.iter().map(|p| [p[0], p[1], p[2]]).collect();
+    let lut = std::sync::Arc::new(crate::gpufx::Lut3 { n, id, data });
+    let mut g = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if g.len() >= 64 {
+        g.clear();
+    }
+    g.insert(id, lut.clone());
+    lut
 }
 
 fn lumetri_advanced(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {

@@ -196,7 +196,40 @@ pub enum FxOp {
         vfeather: f32,
         aspect: f32,
         gpu_capable: bool,
+        /// Curves, wheels, look / look LUT and HSL Secondary baked into a 3-D table, applied after
+        /// the basic stage and the vignette (their place in [`crate::effects`]' Lumetri).
+        lut: Option<std::sync::Arc<Lut3>>,
     },
+}
+
+/// A colour table: `n`³ linear-light RGB outputs on a grid over the encoded (`enc`) cube, red
+/// fastest, then green, then blue. Sampled trilinearly in the encoded domain, inputs clamped to
+/// the cube (SDR only).
+#[derive(Debug, PartialEq)]
+pub struct Lut3 {
+    pub n: usize,
+    /// Identity of the table (hash of what it was built from): GPU textures are cached by it.
+    pub id: u64,
+    pub data: Vec<[f32; 3]>,
+}
+
+impl Lut3 {
+    /// The output for a linear-light input.
+    pub fn sample(&self, c: [f32; 3]) -> [f32; 3] {
+        let n = self.n;
+        let m = (n - 1) as f32;
+        let e = enc(c).map(|v| v.clamp(0.0, 1.0) * m);
+        let i0 = e.map(|v| (v.floor() as usize).min(n - 1));
+        let i1 = i0.map(|i| (i + 1).min(n - 1));
+        let t = [e[0] - i0[0] as f32, e[1] - i0[1] as f32, e[2] - i0[2] as f32];
+        let at = |r: usize, g: usize, b: usize| self.data[r + g * n + b * n * n];
+        let lerp = |a: [f32; 3], b: [f32; 3], k: f32| [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+        let c00 = lerp(at(i0[0], i0[1], i0[2]), at(i1[0], i0[1], i0[2]), t[0]);
+        let c10 = lerp(at(i0[0], i1[1], i0[2]), at(i1[0], i1[1], i0[2]), t[0]);
+        let c01 = lerp(at(i0[0], i0[1], i1[2]), at(i1[0], i0[1], i1[2]), t[0]);
+        let c11 = lerp(at(i0[0], i1[1], i1[2]), at(i1[0], i1[1], i1[2]), t[0]);
+        lerp(lerp(c00, c10, t[1]), lerp(c01, c11, t[1]), t[2])
+    }
 }
 
 /// Effect ids [`FxOp::eval`] understands (the GPU-capable standard effects).
@@ -528,8 +561,12 @@ impl FxOp {
                 };
 
                 let hsl_on = b(e, "hsl_on");
+                // the HSL mask's Denoise / Blur look at neighbours: not a per-pixel colour table
+                let hsl_spatial = hsl_on && (f(e, "hsl_denoise", cx) > 0.0 || f(e, "hsl_blur", cx) > 0.0);
+                let needs_lut = has_curves || has_wheels || hsl_on || has_look_lut || look != 0;
 
-                let gpu_capable = !is_hdr && !has_input_lut && !has_look_lut && look == 0 && sharpen.abs() <= 1e-3 && !has_curves && !has_wheels && !hsl_on;
+                let gpu_capable = !is_hdr && !has_input_lut && sharpen.abs() <= 1e-3 && !hsl_spatial;
+                let lut = (gpu_capable && needs_lut).then(|| crate::effects::lumetri_post_lut(e, cx));
 
                 let bf = |id: &str| if basic_on { f(e, id, cx) } else { 0.0 };
                 let temp = bf("temperature") / 100.0;
@@ -573,6 +610,7 @@ impl FxOp {
                     vfeather,
                     aspect,
                     gpu_capable,
+                    lut,
                 }
             }
             _ => return None,
@@ -629,6 +667,12 @@ impl FxOp {
                     && fin(&[*va, *vmid, *vround, *vfeather, *aspect])
             }
         }
+    }
+
+    /// A Lumetri op carrying a baked colour table (its CPU rendering then goes through the exact
+    /// stages of `effects::lumetri` instead).
+    pub fn has_lut(&self) -> bool {
+        matches!(self, FxOp::Lumetri { lut: Some(_), .. })
     }
 
     /// The CPU reference.
@@ -942,8 +986,10 @@ impl FxOp {
                 vround,
                 vfeather,
                 aspect,
+                lut,
                 ..
             } => {
+                let lut = lut.clone();
                 let gains = *gains;
                 let (exposure, contrast, hl, sh, wh, bl, sat) = (*exposure, *contrast, *hl, *sh, *wh, *bl, *sat);
                 let (creative_on, faded, vib, st, ht) = (*creative_on, *faded, *vib, *st, *ht);
@@ -1001,7 +1047,10 @@ impl FxOp {
                         let k = 1.0 + va * 0.2 * e2;
                         v = v.map(|q| if va < 0.0 { q * k.max(0.0) } else { q + (1.0 - q) * (k - 1.0) });
                     }
-                    dec(v)
+                    match &lut {
+                        Some(l) => l.sample(dec(v)),
+                        None => dec(v),
+                    }
                 });
             }
         }
