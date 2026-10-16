@@ -18,8 +18,10 @@
 //! Working units are linear light with 1.0 = 203 cd/m² ([`crate::REFERENCE_WHITE_NITS`]) in HDR
 //! working spaces, as in [`crate::transform`].
 
+#[cfg(test)]
+use crate::linear_to_srgb;
 use crate::spaces::{Gamut, WorkingSpace};
-use crate::{REFERENCE_WHITE_NITS, hlg_inverse_oetf, hlg_oetf, linear_to_srgb, pq_eotf, pq_inverse_eotf, srgb_to_linear};
+use crate::{REFERENCE_WHITE_NITS, hlg_inverse_oetf, hlg_oetf, linear_to_srgb_fast, pq_eotf, pq_inverse_eotf, srgb_to_linear_fast};
 
 /// Default HDR White / curve HDR Range (cd/m²): the nominal HLG display peak and the usual PQ
 /// mastering peak.
@@ -63,7 +65,7 @@ impl GradeSpace {
     #[inline]
     pub fn encode(&self, c: [f32; 3]) -> [f32; 3] {
         match *self {
-            GradeSpace::Sdr => c.map(|v| linear_to_srgb(v.max(0.0))),
+            GradeSpace::Sdr => c.map(|v| linear_to_srgb_fast(v.max(0.0))),
             GradeSpace::Pq { norm, .. } => c.map(|v| pq_inverse_eotf((v.max(0.0) * REFERENCE_WHITE_NITS as f32 / 10_000.0).min(1.0)) / norm),
             GradeSpace::Hlg { white, gamma } => {
                 // display light normalised to the peak, inverse OOTF (scene light), OETF
@@ -84,7 +86,7 @@ impl GradeSpace {
     #[inline]
     pub fn decode(&self, v: [f32; 3]) -> [f32; 3] {
         match *self {
-            GradeSpace::Sdr => v.map(|q| srgb_to_linear(q.clamp(0.0, 1.0))),
+            GradeSpace::Sdr => v.map(|q| srgb_to_linear_fast(q.clamp(0.0, 1.0))),
             GradeSpace::Pq { norm, .. } => v.map(|q| pq_eotf((q * norm).clamp(0.0, 1.0)) * 10_000.0 / REFERENCE_WHITE_NITS as f32),
             GradeSpace::Hlg { white, gamma } => {
                 // graded highlights may go past signal 1.0 (the display peak); keep them up to

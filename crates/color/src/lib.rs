@@ -185,6 +185,38 @@ pub fn linear_to_srgb(v: f32) -> f32 {
     if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
 }
 
+/// Entries per table of the fast sRGB transfers (plus one, so interpolation never reads past
+/// the end): 65 536 keeps the error within 10⁻⁶ (f32 rounding), far below a 10-bit step.
+const SRGB_FAST_N: usize = 65_536;
+
+fn srgb_fast_table(f: fn(f32) -> f32) -> Vec<f32> {
+    (0..=SRGB_FAST_N).map(|i| f(i as f32 / SRGB_FAST_N as f32)).collect()
+}
+
+/// Linear interpolation in a table sampled at `i / SRGB_FAST_N`, for `v` in 0…1.
+#[inline]
+fn srgb_fast_lookup(t: &[f32], v: f32) -> f32 {
+    let x = v * SRGB_FAST_N as f32;
+    let i = (x as usize).min(SRGB_FAST_N - 1);
+    let a = t.get(i).copied().unwrap_or(0.0);
+    let b = t.get(i + 1).copied().unwrap_or(a);
+    a + (b - a) * (x - i as f32)
+}
+
+/// [`srgb_to_linear`] through a table for 0…1 (per-pixel grading); exact outside that range.
+#[inline]
+pub fn srgb_to_linear_fast(v: f32) -> f32 {
+    static T: OnceLock<Vec<f32>> = OnceLock::new();
+    if (0.0..=1.0).contains(&v) { srgb_fast_lookup(T.get_or_init(|| srgb_fast_table(srgb_to_linear)), v) } else { srgb_to_linear(v) }
+}
+
+/// [`linear_to_srgb`] through a table for 0…1 (per-pixel grading); exact outside that range.
+#[inline]
+pub fn linear_to_srgb_fast(v: f32) -> f32 {
+    static T: OnceLock<Vec<f32>> = OnceLock::new();
+    if (0.0..=1.0).contains(&v) { srgb_fast_lookup(T.get_or_init(|| srgb_fast_table(linear_to_srgb)), v) } else { linear_to_srgb(v) }
+}
+
 /// Encoded → linear for a transfer function (display-referred; PQ normalised to 100 nits = 1.0).
 pub fn to_linear(v: f32, t: Transfer) -> f32 {
     match t {
@@ -317,6 +349,23 @@ pub fn to_hex(c: [f32; 4]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_srgb_transfers_match_the_exact_ones() {
+        let mut worst = (0.0f32, 0.0f32);
+        for i in 0..=1_000_000 {
+            let v = i as f32 / 1_000_000.0;
+            worst.0 = worst.0.max((srgb_to_linear_fast(v) - srgb_to_linear(v)).abs());
+            worst.1 = worst.1.max((linear_to_srgb_fast(v) - linear_to_srgb(v)).abs());
+        }
+        assert!(worst.0 < 1e-6 && worst.1 < 1e-6, "max error {worst:?}");
+        // endpoints exact, outside 0…1 the exact curve, NaN stays NaN (no panic)
+        assert_eq!(srgb_to_linear_fast(1.0), srgb_to_linear(1.0));
+        assert_eq!(linear_to_srgb_fast(0.0), 0.0);
+        assert_eq!(linear_to_srgb_fast(2.5), linear_to_srgb(2.5));
+        assert_eq!(srgb_to_linear_fast(-0.2), srgb_to_linear(-0.2));
+        assert!(linear_to_srgb_fast(f32::NAN).is_nan());
+    }
 
     #[test]
     fn ycbcr_roundtrip() {
