@@ -569,6 +569,35 @@ fn fill_frame_with_focus() {
     assert!(s.execute("clip.fitToFrame", json!({"clips": [c], "focus": [0.5, 0.5]})).is_err());
 }
 
+/// A moving focus animates Position: one eased keyframe per key, at the media time of its
+/// sequence time, each clamped like a still focus; replacing it with a still Fill clears them.
+#[test]
+fn fill_frame_with_moving_focus() {
+    let mut s = demo();
+    let r = s.execute("file.newColorMatte", json!({"width": 960, "height": 1080, "color": "#ff0000"})).unwrap();
+    let matte = r["item"].as_u64().unwrap();
+    let r = s.execute("timeline.place", json!({"item": matte, "track": "V3", "seconds": 1.0})).unwrap();
+    let c = r["clips"][0].as_u64().unwrap();
+    let keys = json!([{"seconds": 1.0, "focus": [0.5, 0.0]}, {"seconds": 2.5, "focus": [0.5, 0.3]}, {"seconds": 4.0, "focus": [0.5, 1.0]}]);
+    let r = s.execute("clip.fillFrame", json!({"clips": [c], "focusKeys": keys})).unwrap();
+    assert_eq!(r["clips"][0]["positionKeys"], 3);
+    let got = clip(&s, c);
+    let prm = got.effect("motion").unwrap().param("position").unwrap();
+    let ys: Vec<f64> = prm.keyframes.iter().map(|k| k.value.as_vec2().unwrap().y).collect();
+    assert_eq!(ys, [1080.0, 972.0, 0.0]);
+    let times: Vec<Tick> = prm.keyframes.iter().map(|k| k.time).collect();
+    let want: Vec<Tick> = [1.0, 2.5, 4.0].iter().map(|t| got.source_time_at(Tick::from_seconds_f64(*t))).collect();
+    assert_eq!(times, want);
+    assert!(prm.keyframes.iter().all(|k| k.interp == filmcraft_project::Interpolation::AutoBezier));
+    // a still Fill afterwards replaces the animation
+    s.execute("clip.fillFrame", json!({"clips": [c]})).unwrap();
+    assert!(clip(&s, c).effect("motion").unwrap().param("position").unwrap().keyframes.is_empty());
+    for bad in [json!([]), json!([{"seconds": 1.0}]), json!([{"seconds": "x", "focus": [0.5, 0.5]}]), json!({"seconds": 1.0})] {
+        assert!(s.execute("clip.fillFrame", json!({"clips": [c], "focusKeys": bad})).is_err(), "{bad}");
+    }
+    assert!(s.execute("clip.fitToFrame", json!({"clips": [c], "focusKeys": [{"seconds": 1.0, "focus": [0.5, 0.5]}]})).is_err());
+}
+
 #[test]
 fn extract_audio_writes_a_wav_and_imports_it() {
     let mut s = demo();

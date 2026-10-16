@@ -227,7 +227,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             "Fill frame",
             &["Clip", "Video Options"],
             None,
-            r#"{"clips":[id]?,"focus":[x,y]? (0–1 of the picture: the point to keep nearest the frame centre)}"#,
+            r#"{"clips":[id]?,"focus":[x,y]? (0–1 of the picture: the point to keep nearest the frame centre),"focusKeys":[{"seconds":f,"focus":[x,y]}]? (a moving focus: one Position keyframe per sequence time, smoothed)}"#,
             has_selection,
             |s, p| fit_fill(s, p, true),
         ),
@@ -1552,6 +1552,26 @@ fn fit_fill(s: &mut Session, p: &Value, fill: bool) -> Result<Value> {
             }
         }
     };
+    // Fill only: a focus that moves, as (sequence time, focus) pairs → animated Position.
+    let cmd = if fill { "clip.fillFrame" } else { "clip.fitToFrame" };
+    let focus_keys: Vec<(Tick, (f64, f64))> = match p.get("focusKeys") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(keys)) if fill && !keys.is_empty() && keys.len() <= 10_000 => {
+            let mut out = Vec::with_capacity(keys.len());
+            for k in keys {
+                let sec = k.get("seconds").and_then(Value::as_f64).filter(|v| v.is_finite() && v.abs() < 1e7);
+                let xy = k.get("focus").and_then(Value::as_array).filter(|a| a.len() == 2).and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)));
+                match (sec, xy) {
+                    (Some(sec), Some((x, y))) if x.is_finite() && y.is_finite() => {
+                        out.push((Tick::from_seconds_f64(sec), (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))))
+                    }
+                    _ => return Err(bad(cmd, "focusKeys: [{seconds, focus: [x, y]}], focus from 0 to 1")),
+                }
+            }
+            out
+        }
+        Some(_) => return Err(bad(cmd, "focusKeys: 1 to 10 000 {seconds, focus: [x, y]} (Fill only)")),
+    };
     let label = if fill { "Fill Frame" } else { "Fit to Frame" };
     let out = s.edit_sequence(label, |q, _, _| {
         let mut out = Vec::new();
@@ -1560,20 +1580,22 @@ fn fit_fill(s: &mut Session, p: &Value, fill: bool) -> Result<Value> {
             let (sx, sy) = (fw / dw.max(1.0), fh / dh.max(1.0));
             let pct = (if fill { sx.max(sy) } else { sx.min(sy) }) * 100.0;
             let (ax, ay) = (*w as f64 / 2.0, *h as f64 / 2.0);
+            // sequence pixels per stored pixel, across and down (pixel aspect included)
+            let (kx, ky) = (dw / (*w).max(1) as f64 * pct / 100.0, dh / (*h).max(1) as f64 * pct / 100.0);
+            // the focus point at the centre, then the picture's edges kept outside the frame
+            let along = |c: f64, f: f64, size: f64, anchor: f64, k: f64| {
+                let lo = c * 2.0 - (size - anchor) * k;
+                let hi = anchor * k;
+                (c - (f * size - anchor) * k).clamp(lo.min(hi), hi.max(lo))
+            };
+            let at = |(fx, fy): (f64, f64)| filmcraft_geom::Vec2::new(along(fw / 2.0, fx, *w as f64, ax, kx), along(fh / 2.0, fy, *h as f64, ay, ky));
             let position = match focus {
-                // sequence pixels per stored pixel, across and down (pixel aspect included)
-                Some((fx, fy)) if *w > 0 && *h > 0 => {
-                    let (kx, ky) = (dw / *w as f64 * pct / 100.0, dh / *h as f64 * pct / 100.0);
-                    // the focus point at the centre, then the picture's edges kept outside the frame
-                    let along = |c: f64, f: f64, size: f64, anchor: f64, k: f64| {
-                        let lo = c * 2.0 - (size - anchor) * k;
-                        let hi = anchor * k;
-                        (c - (f * size - anchor) * k).clamp(lo.min(hi), hi.max(lo))
-                    };
-                    filmcraft_geom::Vec2::new(along(fw / 2.0, fx, *w as f64, ax, kx), along(fh / 2.0, fy, *h as f64, ay, ky))
-                }
+                Some(f) if *w > 0 && *h > 0 => at(f),
                 _ => filmcraft_geom::Vec2::new(fw / 2.0, fh / 2.0),
             };
+            // keyframe times are media times, as Effect Controls stores them
+            let keys: Vec<(Tick, filmcraft_geom::Vec2)> =
+                if *w > 0 && *h > 0 { focus_keys.iter().map(|(t, f)| (it.source_time_at(*t), at(*f))).collect() } else { Vec::new() };
             it.scale_to_frame = false;
             let Some(m) = it.effect_mut("motion") else { continue };
             for (k, v) in [
@@ -1592,7 +1614,18 @@ fn fit_fill(s: &mut Session, p: &Value, fill: bool) -> Result<Value> {
                     }
                 }
             }
-            out.push(json!({"clip": c.0, "scale": pct}));
+            if !keys.is_empty()
+                && let Some(prm) = m.param_mut("position")
+            {
+                for (t, v) in &keys {
+                    prm.put_keyframe(*t, ParamValue::Vec2(*v));
+                }
+                // a camera that eases from one framing to the next instead of jerking at each key
+                for k in &mut prm.keyframes {
+                    k.interp = filmcraft_project::keyframe::Interpolation::AutoBezier;
+                }
+            }
+            out.push(json!({"clip": c.0, "scale": pct, "positionKeys": keys.len()}));
         }
         Ok(out)
     })?;
