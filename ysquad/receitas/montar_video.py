@@ -3,7 +3,7 @@
 Uso:
     python3 -I montar_video.py PASTA_DO_CORTE SAIDA_SEM_EXTENSAO
         [--formato 9x16|16x9|4x3] [--motion CLIPE.mov --motion-em 0.5]
-        [--cor] [--sem-legenda | --legenda-viva] [--legenda-tamanho 72]
+        [--cor] [--sem-legenda | --legenda-viva [ESTILO] | --amostras-legenda PASTA] [--legenda-tamanho 72]
         [--musica TRILHA --musica-db -18] [--sem-voz] [--lufs -14] [--cli CAMINHO_DO_filmcraft-cli]
 
 PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legenda.srt`).
@@ -15,8 +15,10 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
   no quadro; horizontal, entra a 100 % no terço de baixo à esquerda.
 - --cor: Lumetri leve (exposição, contraste, saturação, altas luzes, sombras).
 - A legenda vem dos <title> do FCPXML (o `.srt` só se o corte não tiver) e sai gravada na imagem.
-- --legenda-viva: em vez da legenda fixa, a camada animada do `legenda_viva.py` (HyperFrames,
-  palavra falada na caixa creme), renderizada em paralelo e posta na trilha de cima.
+- --legenda-viva [ESTILO]: em vez da legenda fixa, a camada animada do `legenda_viva.py`
+  (HyperFrames), renderizada em paralelo e posta na trilha de cima. Estilos: caixa (padrão),
+  acende, pop, acumula, limpa. --amostras-legenda PASTA exporta sem legenda e gera, na pasta, um
+  vídeo curto e um quadro de cada estilo sobre o próprio corte (folha.png), pra escolher.
 - efeitos.json na pasta do corte (opcional), escrito por quem leu a fala, com índices de palavra
   do `indice.py` (inclusivos):
     {"zoom": [{"de": 16, "ate": 18, "escala": 115, "entrada": "seco|suave"}],
@@ -198,7 +200,8 @@ def main():
     a.add_argument("--motion-em", type=float, default=0.5)
     a.add_argument("--cor", action="store_true")
     a.add_argument("--sem-legenda", action="store_true")
-    a.add_argument("--legenda-viva", action="store_true")
+    a.add_argument("--legenda-viva", nargs="?", const="caixa", choices=list(legenda_viva.ESTILOS))
+    a.add_argument("--amostras-legenda", metavar="PASTA")
     a.add_argument("--musica")
     a.add_argument("--musica-db", type=float, default=-18.0, help="nível da música sem fala")
     a.add_argument("--sem-voz", action="store_true")
@@ -211,12 +214,14 @@ def main():
     if len(xml) != 1:
         sys.exit(f"esperava um .fcpxml em {o.corte}, achei {len(xml)}")
     w, h = TAMANHOS[o.formato]
+    if o.amostras_legenda:
+        o.sem_legenda = True
     viva = o.legenda_viva and not o.sem_legenda
+    tam, centro = (90, 0.8) if h > w else (round(o.legenda_tamanho * h / 1080), 0.86)
     if viva:
         # renderiza enquanto o FilmCraft monta; no reel, a altura que o corte escolheu (80 %)
         mov = os.path.abspath(o.saida) + "_legenda.mov"
-        tam, centro = (90, 0.8) if h > w else (round(o.legenda_tamanho * h / 1080), 0.86)
-        legenda = subprocess.Popen([sys.executable, "-I", os.path.join(AQUI, "legenda_viva.py"), o.corte, mov,
+        legenda = subprocess.Popen([sys.executable, "-I", os.path.join(AQUI, "legenda_viva.py"), o.corte, mov, "--estilo", o.legenda_viva,
                                     "--largura", str(w), "--altura", str(h), "--tamanho", str(tam), "--centro", str(centro)],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
@@ -303,6 +308,17 @@ def main():
                                   "loudnessLufs": o.lufs, "wait": True})
     m.fechar()
     print(f"exportado em {time.time() - t:.1f} s: {json.dumps(r.get('result', r))}")
+    if o.amostras_legenda:
+        pasta = os.path.abspath(o.amostras_legenda)
+        os.makedirs(pasta, exist_ok=True)
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", os.path.abspath(o.saida) + ".mp4", "-t", "6.5",
+                        "-c:v", "h264_videotoolbox", "-b:v", "16M", "-c:a", "aac", os.path.join(pasta, "fundo.mp4")], check=True)
+        r = subprocess.run([sys.executable, "-I", os.path.join(AQUI, "legenda_viva.py"), o.corte, pasta, "--amostras", "--de", "0",
+                            "--largura", str(w), "--altura", str(h), "--tamanho", str(tam), "--centro", str(centro)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"amostras falharam: {r.stderr[-1500:]}")
+        print(f"amostras: {r.stdout.strip()}")
 
 
 if __name__ == "__main__":
