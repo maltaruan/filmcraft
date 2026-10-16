@@ -441,6 +441,29 @@ pub(crate) fn item_layer(
     item_layer_ex(project, seq, item, t, opts, sources, tc, false).map(|l| l.into_full(w, h))
 }
 
+/// The part of a `lw`×`lh` layer that `m` (layer px → output px) places inside the `w`×`h`
+/// output, as `(x0, y0, width, height)` in layer pixels: grown by a margin for the bilinear taps
+/// (in pixels of the mip level [`Image::transformed`] samples) and snapped to multiples of 64, so
+/// its 2× box pre-filter pairs the same pixels as on the whole layer. None when that saves less
+/// than a tenth of the layer.
+pub(crate) fn visible_layer_rect(m: &Affine, lw: usize, lh: usize, w: usize, h: usize) -> Option<(usize, usize, usize, usize)> {
+    const ALIGN: f64 = 64.0;
+    let minify = 1.0 / (m.a * m.a + m.b * m.b).sqrt().min((m.c * m.c + m.d * m.d).sqrt()).max(1e-6);
+    let margin = 4.0 * minify.clamp(1.0, ALIGN);
+    let b = m.inverse()?.bounds(&filmcraft_geom::Rect::new(0.0, 0.0, w as f64, h as f64));
+    if ![b.x, b.y, b.w, b.h].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let lo = |v: f64, max: usize| ((((v - margin) / ALIGN).floor() * ALIGN).max(0.0) as usize).min(max);
+    let hi = |v: f64, max: usize| ((((v + margin) / ALIGN).ceil() * ALIGN).max(0.0) as usize).min(max);
+    let (x0, y0, x1, y1) = (lo(b.x, lw), lo(b.y, lh), hi(b.x + b.w, lw), hi(b.y + b.h, lh));
+    let (cw, ch) = (x1.checked_sub(x0)?, y1.checked_sub(y0)?);
+    if cw == 0 || ch == 0 || cw.saturating_mul(ch).saturating_mul(10) >= lw.saturating_mul(lh).saturating_mul(9) {
+        return None;
+    }
+    Some((x0, y0, cw, ch))
+}
+
 /// Whether a placement matrix leaves the layer exactly where it is.
 fn identity_placement(m: &Affine) -> bool {
     (m.a - 1.0).abs() < 1e-9 && (m.d - 1.0).abs() < 1e-9 && m.b == 0.0 && m.c == 0.0 && m.e.abs() < 1e-9 && m.f.abs() < 1e-9
@@ -507,7 +530,33 @@ pub(crate) fn item_layer_ex(
     };
     let px_scale = layer.w as f32 / src_size.0.max(1) as f32;
     // layer px → source px → sequence px → output px
-    let m = Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion).then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
+    let mut m =
+        Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion).then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
+    if opts.effects {
+        let cx = effects::FxCtx {
+            t: mt,
+            px_scale,
+            seconds: 0.0,
+            timecode: tc,
+            clip_name: &item.name,
+            project: Some(project),
+            env: None,
+            frame_rate: seq.settings.frame_rate.as_f64(),
+            working: seq.settings.color.working,
+        };
+        // Effects that only look at each pixel's own colour need not run on the part of the
+        // layer Motion puts outside the frame (a vertical clip filling a 16:9 sequence: two thirds).
+        let fx = || item.effects.iter().filter(|e| e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e));
+        if fx().next().is_some()
+            && fx().all(|e| effects::is_pointwise(e, &cx))
+            && !item.has_opacity_masks()
+            && let Some((x0, y0, cw, ch)) = visible_layer_rect(&m, layer.w, layer.h, w, h)
+            && let Some(cropped) = layer.cropped(x0, y0, cw, ch)
+        {
+            layer = cropped;
+            m = m.then_apply(&Affine::translate(x0 as f64, y0 as f64));
+        }
+    }
     if opts.effects {
         let env = vfx::ItemEnv { project, seq, item, t, opts, sources, want, layer_size: (layer.w, layer.h), layer_to_output: m, tc };
         let cx = effects::FxCtx {

@@ -80,6 +80,19 @@ impl Image {
         o
     }
 
+    /// The `cw`×`ch` rectangle at (`x0`, `y0`); None when it does not lie inside the image.
+    pub fn cropped(&self, x0: usize, y0: usize, cw: usize, ch: usize) -> Option<Image> {
+        if x0.checked_add(cw)? > self.w || y0.checked_add(ch)? > self.h {
+            return None;
+        }
+        let mut px = Vec::with_capacity(cw.checked_mul(ch)?.checked_mul(4)?);
+        for y in y0..y0 + ch {
+            let s = (y * self.w + x0) * 4;
+            px.extend_from_slice(self.px.get(s..s + cw * 4)?);
+        }
+        Some(Image { w: cw, h: ch, px })
+    }
+
     /// Resample `self` into a `w`×`h` image through `m` (maps source pixels → destination pixels).
     /// Uses bilinear filtering, with a box pre-filter (mip level) when minifying by more than 2×.
     pub fn transformed(&self, w: usize, h: usize, m: &Affine) -> Image {

@@ -620,6 +620,20 @@ fn within_unit(v: [f32; 3], hdr: bool, f: impl Fn([f32; 3]) -> [f32; 3]) -> [f32
     o.map(|q| q * m)
 }
 
+/// Whether `e` changes each pixel from that pixel's colour alone, so it gives the same result on
+/// any crop of the layer: Lumetri without the controls that look at a pixel's position (vignette)
+/// or its neighbours (sharpen, HSL key denoise / blur), unmasked. Disabled effects change nothing.
+pub(crate) fn is_pointwise(e: &EffectInstance, cx: &FxCtx) -> bool {
+    if !e.enabled {
+        return true;
+    }
+    e.effect == "lumetri"
+        && e.masks.is_empty()
+        && !(on(e, "vignette_on") && f(e, "vignette_amount", cx).abs() > 1e-4)
+        && !(on(e, "creative_on") && f(e, "sharpen", cx).abs() > 1e-3)
+        && !(b(e, "hsl_on") && (f(e, "hsl_denoise", cx) > 0.0 || f(e, "hsl_blur", cx) > 0.0))
+}
+
 fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
     let (basic_on, creative_on, vignette_on) = (on(e, "basic_on"), on(e, "creative_on"), on(e, "vignette_on"));
     let input_lut = if basic_on { crate::luts::resolve(cx.project, text(e, "input_lut")) } else { None };
@@ -1416,6 +1430,42 @@ mod lumetri_cpu_parity_tests {
             }
         }
         Image { w, h, px }
+    }
+
+    /// Pointwise Lumetri on the visible crop of a layer gives the frame it gives on the whole
+    /// layer: a vertical layer filling a landscape frame, at a plain scale and minified past 2×
+    /// (the box pre-filter path); a vignette makes it not pointwise.
+    #[test]
+    fn pointwise_lumetri_on_the_visible_crop_matches_the_whole_layer() {
+        let cx = FxCtx {
+            t: Tick::ZERO,
+            px_scale: 1.0,
+            seconds: 0.0,
+            timecode: "",
+            clip_name: "",
+            project: None,
+            env: None,
+            frame_rate: 25.0,
+            working: filmcraft_color::WorkingSpace::Rec709,
+        };
+        let e = effect(&[("exposure", fl(0.3)), ("contrast", fl(15.0)), ("saturation", fl(115.0)), ("highlights", fl(-20.0)), ("wheel_shadows_l", fl(-8.0))]);
+        assert!(is_pointwise(&e, &cx));
+        assert!(!is_pointwise(&effect(&[("vignette_amount", fl(-2.0))]), &cx));
+        let (lw, lh) = (300usize, 520usize);
+        for (w, h) in [(160usize, 90usize), (40, 22)] {
+            let s = w as f64 / lw as f64;
+            let m = filmcraft_geom::Affine::translate(0.0, (h as f64 - lh as f64 * s) / 2.0).then_apply(&filmcraft_geom::Affine::scale(s, s));
+            let mut whole = test_picture(lw, lh);
+            lumetri(&mut whole, &e, &cx);
+            let want = whole.transformed(w, h, &m);
+            let (x0, y0, cw, ch) = crate::visible_layer_rect(&m, lw, lh, w, h).expect("a crop for a filled frame");
+            assert!(cw * ch < lw * lh / 2, "{w}x{h}: crop {cw}x{ch} of {lw}x{lh}");
+            let mut part = test_picture(lw, lh).cropped(x0, y0, cw, ch).expect("crop inside the layer");
+            lumetri(&mut part, &e, &cx);
+            let got = part.transformed(w, h, &m.then_apply(&filmcraft_geom::Affine::translate(x0 as f64, y0 as f64)));
+            let diff = want.px.iter().zip(&got.px).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            assert!(diff <= 1e-5, "{w}x{h}: max diff {diff:.2e}");
+        }
     }
 
     fn effect(params: &[(&str, ParamValue)]) -> EffectInstance {
