@@ -222,7 +222,15 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             },
         ),
         spec("clip.fitToFrame", "Fit to frame", &["Clip", "Video Options"], None, r#"{"clips":[id]?}"#, has_selection, |s, p| fit_fill(s, p, false)),
-        spec("clip.fillFrame", "Fill frame", &["Clip", "Video Options"], None, r#"{"clips":[id]?}"#, has_selection, |s, p| fit_fill(s, p, true)),
+        spec(
+            "clip.fillFrame",
+            "Fill frame",
+            &["Clip", "Video Options"],
+            None,
+            r#"{"clips":[id]?,"focus":[x,y]? (0–1 of the picture: the point to keep nearest the frame centre)}"#,
+            has_selection,
+            |s, p| fit_fill(s, p, true),
+        ),
         spec("clip.breakoutToMono", "Breakout to Mono", &["Clip", "Audio Options"], None, r#"{"items":[id]?}"#, has_audio_items, breakout_to_mono),
         spec("clip.extractAudio", "Extract Audio", &["Clip", "Audio Options"], None, r#"{"items":[id]?,"dir":str?}"#, has_extractable, extract_audio),
         spec("clip.replaceFromSource", "From Source Monitor", &["Clip", "Replace With Clip"], None, r#"{"clips":[id]?}"#, can_replace_from_source, |s, p| {
@@ -1532,6 +1540,18 @@ fn fit_fill(s: &mut Session, p: &Value, fill: bool) -> Result<Value> {
     if sizes.is_empty() {
         return Err(bad(if fill { "clip.fillFrame" } else { "clip.fitToFrame" }, "select a video clip"));
     }
+    // Fill only: the point of the picture (0–1 across, 0–1 down) to bring to the frame centre, as
+    // far as the filled picture still covers the frame (a face high in a vertical clip).
+    let focus = match p.get("focus") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let xy = v.as_array().filter(|a| a.len() == 2).and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)));
+            match xy {
+                Some((x, y)) if fill && x.is_finite() && y.is_finite() => Some((x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))),
+                _ => return Err(bad(if fill { "clip.fillFrame" } else { "clip.fitToFrame" }, "focus: [x, y], numbers from 0 to 1 (Fill only)")),
+            }
+        }
+    };
     let label = if fill { "Fill Frame" } else { "Fit to Frame" };
     let out = s.edit_sequence(label, |q, _, _| {
         let mut out = Vec::new();
@@ -1539,13 +1559,28 @@ fn fit_fill(s: &mut Session, p: &Value, fill: bool) -> Result<Value> {
             let Some((_, it)) = q.find_item_mut(*c) else { continue };
             let (sx, sy) = (fw / dw.max(1.0), fh / dh.max(1.0));
             let pct = (if fill { sx.max(sy) } else { sx.min(sy) }) * 100.0;
+            let (ax, ay) = (*w as f64 / 2.0, *h as f64 / 2.0);
+            let position = match focus {
+                // sequence pixels per stored pixel, across and down (pixel aspect included)
+                Some((fx, fy)) if *w > 0 && *h > 0 => {
+                    let (kx, ky) = (dw / *w as f64 * pct / 100.0, dh / *h as f64 * pct / 100.0);
+                    // the focus point at the centre, then the picture's edges kept outside the frame
+                    let along = |c: f64, f: f64, size: f64, anchor: f64, k: f64| {
+                        let lo = c * 2.0 - (size - anchor) * k;
+                        let hi = anchor * k;
+                        (c - (f * size - anchor) * k).clamp(lo.min(hi), hi.max(lo))
+                    };
+                    filmcraft_geom::Vec2::new(along(fw / 2.0, fx, *w as f64, ax, kx), along(fh / 2.0, fy, *h as f64, ay, ky))
+                }
+                _ => filmcraft_geom::Vec2::new(fw / 2.0, fh / 2.0),
+            };
             it.scale_to_frame = false;
             let Some(m) = it.effect_mut("motion") else { continue };
             for (k, v) in [
                 ("scale", ParamValue::Float(pct)),
                 ("uniform_scale", ParamValue::Bool(true)),
-                ("position", ParamValue::Vec2(filmcraft_geom::Vec2::new(fw / 2.0, fh / 2.0))),
-                ("anchor", ParamValue::Vec2(filmcraft_geom::Vec2::new(*w as f64 / 2.0, *h as f64 / 2.0))),
+                ("position", ParamValue::Vec2(position)),
+                ("anchor", ParamValue::Vec2(filmcraft_geom::Vec2::new(ax, ay))),
             ] {
                 match m.param_mut(k) {
                     Some(prm) => {

@@ -543,6 +543,32 @@ fn fit_and_fill_frame() {
     assert!(s.execute("clip.fitToFrame", json!({})).is_err());
 }
 
+/// Fill with `focus` brings that point of the picture to the frame centre as far as the filled
+/// picture still covers the frame: a 960×1080 matte filling 1920×1080 (200 %) overflows only
+/// vertically, so the focus moves it up and down between its top and bottom edges.
+#[test]
+fn fill_frame_with_focus() {
+    let mut s = demo();
+    let r = s.execute("file.newColorMatte", json!({"width": 960, "height": 1080, "color": "#ff0000"})).unwrap();
+    let matte = r["item"].as_u64().unwrap();
+    let r = s.execute("timeline.place", json!({"item": matte, "track": "V3", "seconds": 0.0})).unwrap();
+    let c = r["clips"][0].as_u64().unwrap();
+    let pos = |s: &Session| clip(s, c).effect("motion").unwrap().param("position").unwrap().value.as_vec2().unwrap();
+    for (focus, want_y) in [([0.5, 0.3], 972.0), ([0.5, 0.0], 1080.0), ([0.5, 1.0], 0.0), ([0.0, 0.5], 540.0)] {
+        s.execute("clip.fillFrame", json!({"clips": [c], "focus": focus})).unwrap();
+        assert!((f64_param(&clip(&s, c), "motion", "scale") - 200.0).abs() < 1e-9);
+        // no horizontal overflow: x stays centred whatever the focus
+        assert_eq!(pos(&s), filmcraft_geom::Vec2::new(960.0, want_y), "focus {focus:?}");
+    }
+    // without focus: centred, as before
+    s.execute("clip.fillFrame", json!({"clips": [c]})).unwrap();
+    assert_eq!(pos(&s), filmcraft_geom::Vec2::new(960.0, 540.0));
+    for bad in [json!([0.5]), json!(["a", 0.5]), json!({"x": 0.5})] {
+        assert!(s.execute("clip.fillFrame", json!({"clips": [c], "focus": bad})).is_err(), "{bad}");
+    }
+    assert!(s.execute("clip.fitToFrame", json!({"clips": [c], "focus": [0.5, 0.5]})).is_err());
+}
+
 #[test]
 fn extract_audio_writes_a_wav_and_imports_it() {
     let mut s = demo();
