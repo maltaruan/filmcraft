@@ -16,11 +16,20 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
 - A legenda vem dos <title> do FCPXML (o `.srt` só se o corte não tiver) e sai gravada na imagem.
 - --legenda-viva: em vez da legenda fixa, a camada animada do `legenda_viva.py` (HyperFrames,
   palavra falada na caixa creme), renderizada em paralelo e posta na trilha de cima.
+- efeitos.json na pasta do corte (opcional), escrito por quem leu a fala, com índices de palavra
+  do `indice.py` (inclusivos):
+    {"zoom": [{"de": 16, "ate": 18, "escala": 115, "entrada": "seco|suave"}],
+     "desfoque": [{"de": 56, "ate": 58, "forca": 40, "sentido": "abre|fecha"}]}
+  zoom = efeito Transform centrado no rosto, por cima do enquadramento: "seco" corta pra escala
+  na primeira palavra e volta no fim da última; "suave" aproxima devagar até o fim e corta de volta.
+  desfoque = Gaussian Blur: "abre" vai da força a zero (foco que chega), "fecha" de zero à força.
 - Exporta H.264 com o chip de vídeo do Mac (`hardwareEncoding: auto`).
 """
 import argparse, glob, json, os, re, subprocess, sys, time, urllib.parse
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, AQUI)
+import legenda_viva  # noqa: E402
 TPS = 254_016_000_000
 TAMANHOS = {"9x16": (1080, 1920), "16x9": (1920, 1080), "4x3": (1440, 1080)}
 COR = {"exposure": 0.3, "contrast": 15, "saturation": 115, "highlights": -20, "shadows": 10}
@@ -69,6 +78,87 @@ def focos_do_rosto(video, cli):
     return json.loads(out)
 
 
+def formato_da_fonte(fcpxml):
+    m = re.search(r'<format [^>]*width="(\d+)" height="(\d+)"', open(fcpxml, encoding="utf-8").read())
+    return (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
+
+
+def aplicar_efeitos(m, corte, xml, clipes, focos):
+    """Aplica o efeitos.json do corte nos clipes da V1. Tempo do corte -> tempo da mídia de cada clipe."""
+    caminho = os.path.join(corte, "efeitos.json")
+    if not os.path.exists(caminho):
+        return
+    plano = json.load(open(caminho, encoding="utf-8"))
+    _, trechos = legenda_viva.frases_do_corte(xml)
+    pal = legenda_viva.palavras_indexadas(os.path.join(corte, "transcript.json"), trechos)
+    fw, fh = formato_da_fonte(xml)
+    um_quadro = TPS // 25
+
+    def faixa(e):
+        if e["de"] not in pal or e["ate"] not in pal:
+            sys.exit(f"efeito {e}: palavra fora do corte")
+        return float(pal[e["de"]][0]), float(pal[e["ate"]][1])
+
+    def pedacos(t0, t1):
+        """(clipe, mídia em t0, mídia em t1) de cada clipe que a faixa toca."""
+        for c in clipes:
+            ini, fim = c["start"] / TPS, (c["start"] + c["sourceOut"] - c["sourceIn"]) / TPS
+            a, b = max(t0, ini), min(t1, fim)
+            if b > a:
+                yield c, c["sourceIn"] + round((a - ini) * TPS), c["sourceIn"] + round((b - ini) * TPS), c["sourceIn"]
+
+    feitos = set()
+    por_id = {c["clip"]: c for c in clipes}
+
+    def kf(cid, efeito, param, t, v, interp):
+        """Keyframe no tempo de mídia `t`: cria pelo tempo da linha do tempo (addKeyframe liga/desliga,
+        então só uma vez por ponto) e acerta valor e interpolação pelo tempo de mídia."""
+        c = por_id[cid]
+        t = min(max(int(t), c["sourceIn"]), c["sourceOut"] - 1)  # o quadro depois do fim cai dentro do clipe
+        if (cid, efeito, param, t) not in feitos:
+            m.run("effects.addKeyframe", {"clip": cid, "effect": efeito, "param": param, "time": c["start"] + t - c["sourceIn"]})
+            feitos.add((cid, efeito, param, t))
+        m.run("effects.setKeyframe", {"clip": cid, "effect": efeito, "param": param, "mediaTime": t, "value": v})
+        m.run("effects.setInterpolation", {"clip": cid, "effect": efeito, "param": param, "mediaTime": int(t), "interpolation": interp})
+
+    com_transform, com_blur = set(), set()
+    for z in plano.get("zoom", []):
+        t0, t1 = faixa(z)
+        for c, a, b, base in pedacos(t0, t1):
+            cid = c["clip"]
+            if cid not in com_transform:
+                m.run("effects.apply", {"clips": [cid], "effect": "Transform"})
+                src = c["sourceIn"] / TPS
+                perto = min(focos, key=lambda k: abs(k["seconds"] - src)) if focos else {"focus": [0.5, 0.4]}
+                ponto = [perto["focus"][0] * fw, perto["focus"][1] * fh]
+                for prm in ("anchor", "position"):
+                    m.run("effects.setParam", {"clip": cid, "effect": "transform", "param": prm, "value": ponto})
+                kf(cid, "transform", "scale_height", base, 100.0, "hold")
+                com_transform.add(cid)
+            s = float(z.get("escala", 115))
+            if z.get("entrada", "seco") == "suave":
+                kf(cid, "transform", "scale_height", a, 100.0, "easeOut")
+                kf(cid, "transform", "scale_height", b, s, "hold")
+            else:
+                kf(cid, "transform", "scale_height", a, s, "hold")
+            kf(cid, "transform", "scale_height", b + um_quadro, 100.0, "hold")
+    for d in plano.get("desfoque", []):
+        t0, t1 = faixa(d)
+        forte, zero = float(d.get("forca", 40)), 0.0
+        ida, volta = (forte, zero) if d.get("sentido", "abre") == "abre" else (zero, forte)
+        for c, a, b, base in pedacos(t0, t1):
+            cid = c["clip"]
+            if cid not in com_blur:
+                m.run("effects.apply", {"clips": [cid], "effect": "Gaussian Blur"})
+                m.run("effects.setParam", {"clip": cid, "effect": "gaussian_blur", "param": "repeat_edge", "value": True})
+                kf(cid, "gaussian_blur", "blurriness", base, 0.0, "hold")
+                com_blur.add(cid)
+            kf(cid, "gaussian_blur", "blurriness", a, ida, "linear")
+            kf(cid, "gaussian_blur", "blurriness", b, volta, "hold")
+            kf(cid, "gaussian_blur", "blurriness", b + um_quadro, 0.0, "hold")
+    print(f"efeitos: {len(plano.get('zoom', []))} zoom, {len(plano.get('desfoque', []))} desfoque", file=sys.stderr)
+
+
 def main():
     a = argparse.ArgumentParser()
     a.add_argument("corte")
@@ -107,10 +197,11 @@ def main():
     if (w, h) != (seq["settings"]["width"], seq["settings"]["height"]):
         m.run("sequence.settings", {"width": w, "height": h})
 
+    tem_efeitos = os.path.exists(os.path.join(o.corte, "efeitos.json"))
+    focos = focos_do_rosto(video_do_fcpxml(xml[0]), cli) if (h <= w or tem_efeitos) else []
     if h > w:
         m.run("clip.fillFrame", {"clips": [c["clip"] for c in clipes]})
     else:
-        focos = focos_do_rosto(video_do_fcpxml(xml[0]), cli)
         for c in clipes:
             si, so, st = c["sourceIn"] / TPS, c["sourceOut"] / TPS, c["start"] / TPS
             keys = [{"seconds": round(st + k["seconds"] - si, 3), "focus": k["focus"]} for k in focos if si <= k["seconds"] <= so]
@@ -122,6 +213,7 @@ def main():
             else:
                 m.run("clip.fillFrame", {"clips": [c["clip"]]})
 
+    aplicar_efeitos(m, o.corte, xml[0], clipes, focos)
     ids = [c["clip"] for c in clipes]
     if o.cor:
         m.run("effects.apply", {"clips": ids, "effect": "Lumetri Color"})

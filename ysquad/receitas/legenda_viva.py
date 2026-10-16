@@ -42,17 +42,25 @@ def frases_do_corte(fcpxml):
     return [tuple(f) for f in frases if f[1] > f[0]], trechos
 
 
-def palavras_no_corte(transcript, trechos):
-    """Palavras da transcrição com tempo levado ao corte; as que caíram fora dos trechos somem."""
-    saida = []
-    for p in json.load(open(transcript, encoding="utf-8")):
-        meio = fractions.Fraction(p["start"] + p["end"]) / 2
-        for off, ini, dur in trechos:
-            if ini <= meio < ini + dur:
-                d = off - ini
-                saida.append((max(off, fractions.Fraction(p["start"]) + d), min(off + dur, fractions.Fraction(p["end"]) + d)))
-                break
+def palavras_indexadas(transcript, trechos):
+    """{índice da palavra na transcrição: (início, fim) no corte}; as que caíram fora dos trechos somem.
+    O índice é o mesmo do `indice.py` e do `cortes.json` do cortar-fala."""
+    saida = {}
+    for i, p in enumerate(json.load(open(transcript, encoding="utf-8"))):
+        a, b = fractions.Fraction(p["start"]), fractions.Fraction(p["end"])
+        # o trecho que contém o meio da palavra; na emenda, o que mais se sobrepõe a ela
+        meio = (a + b) / 2
+        dentro = [t for t in trechos if t[1] <= meio < t[1] + t[2]]
+        if not dentro:
+            dentro = sorted((t for t in trechos if min(b, t[1] + t[2]) > max(a, t[1])), key=lambda t: min(b, t[1] + t[2]) - max(a, t[1]))[-1:]
+        if dentro:
+            off, ini, dur = dentro[0]
+            saida[i] = (max(off, a + off - ini), min(off + dur, b + off - ini))
     return saida
+
+
+def palavras_no_corte(transcript, trechos):
+    return [t for _, t in sorted(palavras_indexadas(transcript, trechos).items())]
 
 
 def montar_linhas(frases, palavras):
