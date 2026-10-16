@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use filmcraft_geom::Vec2;
 use filmcraft_media::MediaKind;
 use filmcraft_project::{
-    BinId, ItemId, ItemKind, Keyframe, Label, Marker, MarkerId, MarkerKind, Param, ParamValue, Project, Sequence, TrackItem, TrackKind, Transition,
+    BinId, Caption, CaptionAlign, CaptionAnchor, CaptionFormat, CaptionStyle, CaptionTrack, ClipId, ItemId, ItemKind, Keyframe, Label, Marker, MarkerId, MarkerKind, Param, ParamValue, Project, Sequence, TrackId, TrackItem, TrackKind, Transition,
     TransitionAlign, TransitionId, effect::find_effect_by_name,
 };
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
@@ -133,6 +133,16 @@ struct Imp<'a, 'i, 'r> {
     media_nodes: HashMap<String, Node<'a, 'i>>,
     media_items: HashMap<String, ItemId>,
     effects: HashMap<String, String>,
+    /// `<title>`s of the sequence being laid out; they become a caption track.
+    titles: Vec<TitleCue>,
+}
+
+/// A `<title>` read as a caption block (timeline time).
+struct TitleCue {
+    start: Tick,
+    duration: Tick,
+    text: String,
+    style: Option<CaptionStyle>,
 }
 
 /// Placement context of a storyline element.
@@ -164,6 +174,7 @@ pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> R
         media_nodes: HashMap::new(),
         media_items: HashMap::new(),
         effects: HashMap::new(),
+        titles: Vec::new(),
     };
     if let Some(res) = child(root, "resources") {
         for r in elements(res) {
@@ -302,9 +313,16 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
         let ctx = Ctx { seq_rate: rate, frame: (w, h) };
         self.b.ensure_tracks(&mut seq, TrackKind::Video, 1);
         self.b.ensure_tracks(&mut seq, TrackKind::Audio, 1);
+        // A compound clip lays out its own sequence midway: keep the outer titles apart.
+        let outer = std::mem::take(&mut self.titles);
         if let Some(spine) = child(s, "spine") {
             // Sequence time origin is tcStart.
             self.storyline(&mut seq, &ctx, spine, -tc_start, 0, true);
+        }
+        let titles = std::mem::replace(&mut self.titles, outer);
+        if !titles.is_empty() {
+            let track = self.title_track(titles);
+            seq.caption_tracks.push(track);
         }
         seq.markers.sort_by_key(|m| m.start);
         self.b.put_sequence(id, seq);
@@ -399,7 +417,13 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                 Some((item, tc, true, self.b.p.sequence(item).is_some_and(|s| s.audio_tracks.iter().any(|t| !t.items.is_empty()))))
             }),
             "gap" => None,
-            "title" | "video" | "audio" | "sync-clip" | "mc-clip" | "live-drawing" => {
+            "title" => {
+                if let Some(cue) = title_cue(el, t0, dur, ctx.frame) {
+                    self.titles.push(cue);
+                }
+                None
+            }
+            "video" | "audio" | "sync-clip" | "mc-clip" | "live-drawing" => {
                 self.report.warn(format!("FCPXML <{tag}> elements are not supported and were skipped"));
                 None
             }
@@ -473,6 +497,32 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
         }
         let _ = placed;
         (t0 + dur, vclip)
+    }
+
+    /// The sequence's titles as one caption track (burned in on export like any caption). Titles
+    /// that overlap are cut at the next one's start, as caption blocks never overlap.
+    fn title_track(&mut self, mut cues: Vec<TitleCue>) -> CaptionTrack {
+        cues.sort_by_key(|c| c.start);
+        let mut t = CaptionTrack::new(TrackId(self.b.alloc()), "Titles".into(), CaptionFormat::Subtitle);
+        t.language = String::new();
+        if let Some(style) = cues.iter().find_map(|c| c.style.clone()) {
+            t.style = style;
+        }
+        let n = cues.len();
+        for i in 0..n {
+            let start = cues[i].start.max(Tick::ZERO);
+            let mut end = cues[i].start + cues[i].duration;
+            if let Some(next) = cues.get(i + 1) {
+                end = end.min(next.start);
+            }
+            if end > start {
+                let id = ClipId(self.b.alloc());
+                let text = std::mem::take(&mut cues[i].text);
+                t.captions.push(Caption { id, start, duration: end - start, text, speaker: None, cue_id: None, settings: String::new() });
+            }
+        }
+        self.report.info(format!("{n} FCPXML titles were imported as captions on the \"Titles\" caption track"));
+        t
     }
 
     fn markers(&mut self, el: Node, local_start: Tick, src_in: Tick, speed: f64, rate: FrameRate) -> Vec<Marker> {
@@ -589,6 +639,71 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
             }
         }
         Some(p)
+    }
+}
+
+/// A `<title>` with text, as a caption block starting at `t0`.
+fn title_cue(el: Node, t0: Tick, dur: Tick, frame: (u32, u32)) -> Option<TitleCue> {
+    let text: String = child(el, "text")?.descendants().filter(|n| n.is_text()).filter_map(|n| n.text()).collect();
+    let text = text.trim().to_string();
+    if text.is_empty() || dur <= Tick::ZERO {
+        return None;
+    }
+    Some(TitleCue { start: t0, duration: dur, text, style: title_style(el, frame) })
+}
+
+/// The caption style closest to a title's first text style: font, size, colour, stroke as outline
+/// (no background box, titles have none) and the vertical position as anchor + margin.
+///
+/// FCP sizes text against the shorter side of the frame (a 90 pt caption fits a vertical frame
+/// three words wide); caption sizes are per 1080 lines of height, so sizes scale by short / height.
+fn title_style(el: Node, frame: (u32, u32)) -> Option<CaptionStyle> {
+    let ts = child(el, "text-style-def").and_then(|d| child(d, "text-style"))?;
+    let k = if frame.1 > 0 { frame.0.min(frame.1) as f32 / frame.1 as f32 } else { 1.0 };
+    let f32_attr = |name: &str| ts.attribute(name).and_then(|v| v.trim().parse::<f32>().ok());
+    let mut s = CaptionStyle { background: false, ..CaptionStyle::default() };
+    if let Some(font) = ts.attribute("font").filter(|f| !f.is_empty()) {
+        s.font = font.to_string();
+    }
+    if let Some(size) = f32_attr("fontSize").filter(|v| *v > 0.0) {
+        s.size = size * k;
+    }
+    if let Some(c) = ts.attribute("fontColor").and_then(rgba) {
+        s.color = c;
+    }
+    // FCP draws a negative stroke width outside the glyphs; the outline is always outside.
+    if let Some(w) = f32_attr("strokeWidth").filter(|w| *w != 0.0) {
+        s.outline = w.abs() * k;
+        if let Some(c) = ts.attribute("strokeColor").and_then(rgba) {
+            s.outline_color = c;
+        }
+    }
+    s.align = match ts.attribute("alignment") {
+        Some("left") => CaptionAlign::Left,
+        Some("right") => CaptionAlign::Right,
+        _ => CaptionAlign::Center,
+    };
+    // Position is in % of the frame height from the centre, y up (see `adjustments`).
+    let y = child(el, "adjust-transform").and_then(|a| a.attribute("position")).map_or(0.0, |p| pair(p).1);
+    (s.anchor, s.margin) = if y < -1e-9 {
+        (CaptionAnchor::Bottom, (0.5 + y / 100.0) as f32)
+    } else if y > 1e-9 {
+        (CaptionAnchor::Top, (0.5 - y / 100.0) as f32)
+    } else {
+        (CaptionAnchor::Middle, 0.0)
+    };
+    s.margin = s.margin.clamp(0.0, 0.45);
+    Some(s)
+}
+
+/// FCPXML colour `"r g b a"` (0..1) as sRGB bytes.
+fn rgba(v: &str) -> Option<[u8; 4]> {
+    let c: Vec<f64> = v.split_whitespace().map(|x| x.parse::<f64>()).collect::<std::result::Result<_, _>>().ok()?;
+    let b = |x: f64| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    match c[..] {
+        [r, g, bl] => Some([b(r), b(g), b(bl), 255]),
+        [r, g, bl, a] => Some([b(r), b(g), b(bl), b(a)]),
+        _ => None,
     }
 }
 

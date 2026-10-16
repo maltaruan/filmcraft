@@ -464,6 +464,12 @@ pub fn merge_into(target: &mut Project, fragment: Imported, bin: Option<BinId>) 
                         tr.to = tr.to.and_then(|c| clips.get(&c).copied());
                     }
                 }
+                for ct in &mut seq.caption_tracks {
+                    ct.id = TrackId(target.alloc_id());
+                    for c in &mut ct.captions {
+                        c.id = ClipId(target.alloc_id());
+                    }
+                }
             }
             ItemKind::Subclip { parent, .. } => {
                 if let Some(p) = items.get(parent) {

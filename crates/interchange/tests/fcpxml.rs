@@ -345,3 +345,58 @@ proptest! {
         prop_assert_eq!(links(&imp.project, si), links(&p, s));
     }
 }
+
+/// `<title>`s connected to a trimmed clip (as written by a cut tool) become one caption track:
+/// times mapped through the parent's start, overlaps cut, style read from the text style.
+#[test]
+fn titles_become_a_caption_track() {
+    let d = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+    <format id="r1" frameDuration="1/25s" width="1080" height="1920"/>
+    <asset id="r2" name="Talk" start="0s" duration="60s" hasVideo="1" hasAudio="1" format="r1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="file:///Media/talk.mp4"/>
+    </asset>
+    <effect id="r3" name="Basic Title" uid=".../Basic Title.moti"/>
+  </resources>
+  <library>
+    <event name="Cut">
+      <project name="Cut">
+        <sequence format="r1" duration="10s" tcStart="0s">
+          <spine>
+            <asset-clip ref="r2" offset="0s" name="Talk" start="0s" duration="4s"/>
+            <asset-clip ref="r2" offset="4s" name="Talk" start="20s" duration="6s"><title ref="r3" lane="1" offset="21s" duration="2s" name="Caption 1"><text><text-style ref="ts1">HELLO THERE</text-style></text><text-style-def id="ts1"><text-style font="Helvetica Neue" fontSize="90" fontFace="Bold" fontColor="1 1 1 1" strokeColor="0 0 0 1" strokeWidth="-6" alignment="center"/></text-style-def><adjust-transform position="0 -30"/></title><title ref="r3" lane="1" offset="22s" duration="1s" name="Caption 2"><text><text-style ref="ts2">AGAIN</text-style></text></title></asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+    let (imp, rep) = import(d.as_bytes(), Format::Fcpxml, Some("/proj")).unwrap();
+    assert!(!rep.entries.iter().any(|e| e.message.contains("<title>")), "{rep:?}");
+    let seq = imp.project.sequence(only_seq(&imp)).unwrap();
+    assert_eq!(seq.caption_tracks.len(), 1);
+    let t = &seq.caption_tracks[0];
+    let s = |x: f64| filmcraft_time::Tick((x * filmcraft_time::TICKS_PER_SECOND as f64) as i64);
+    let got: Vec<(filmcraft_time::Tick, filmcraft_time::Tick, &str)> = t.captions.iter().map(|c| (c.start, c.duration, c.text.as_str())).collect();
+    // 4 s on the timeline + (21 s - 20 s) into the clip; the first is cut where the second starts
+    assert_eq!(got, vec![(s(5.0), s(1.0), "HELLO THERE"), (s(6.0), s(1.0), "AGAIN")]);
+    assert_eq!(t.style.font, "Helvetica Neue");
+    // 1080x1920: FCP's 90 pt against the 1080 px width = 50.625 per 1080 lines of height
+    assert!((t.style.size - 90.0 * 1080.0 / 1920.0).abs() < 1e-4);
+    assert!((t.style.outline - 6.0 * 1080.0 / 1920.0).abs() < 1e-4);
+    assert!(!t.style.background);
+    assert_eq!(t.style.anchor, filmcraft_project::CaptionAnchor::Bottom);
+    assert!((t.style.margin - 0.2).abs() < 1e-6);
+
+    // merged into a project, the caption ids stay unique
+    let mut p = Project::new("P");
+    let ids = filmcraft_interchange::merge_into(&mut p, imp, None);
+    let seq = p.sequence(ids[0]).unwrap();
+    let mut seen: Vec<u64> = seq.all_tracks().map(|t| t.id.0).chain(seq.caption_tracks.iter().flat_map(|t| std::iter::once(t.id.0).chain(t.captions.iter().map(|c| c.id.0)))).collect();
+    let n = seen.len();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), n);
+}

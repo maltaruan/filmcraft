@@ -13,7 +13,7 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
 - --motion: clipe com transparência (ex.: HyperFrames `--format mov`) na V2. Vertical, encaixa
   no quadro; horizontal, entra a 100 % no terço de baixo à esquerda.
 - --cor: Lumetri leve (exposição, contraste, saturação, altas luzes, sombras).
-- A legenda vai pelo `.srt` (o FilmCraft ignora os <title> do FCPXML) e sai gravada na imagem.
+- A legenda vem dos <title> do FCPXML (o `.srt` só se o corte não tiver) e sai gravada na imagem.
 - Exporta H.264 com o chip de vídeo do Mac (`hardwareEncoding: auto`).
 """
 import argparse, glob, json, os, re, subprocess, sys, time, urllib.parse
@@ -118,18 +118,24 @@ def main():
             for k, v in COR.items():
                 m.run("effects.setParam", {"clip": cid, "effect": "lumetri", "param": k, "value": v})
     if not o.sem_legenda:
+        # os títulos do FCPXML já entram como trilha de legenda; o .srt só cobre corte sem eles
+        trilhas = m.run("captions.list").get("tracks", [])
+        trilha = trilhas[0]["id"] if trilhas else None
         srt = os.path.join(o.corte, "legenda.srt")
-        if os.path.exists(srt):
-            leg = m.run("captions.import", {"path": srt})
-            if h < w:
-                # o tamanho é por 1080 linhas: no horizontal o padrão (54) some no quadro largo
-                m.run("captions.setStyle", {"track": leg["track"], "size": o.legenda_tamanho})
+        if trilha is None and os.path.exists(srt):
+            trilha = m.run("captions.import", {"path": srt})["track"]
+        if trilha is not None and h < w:
+            # o tamanho é por 1080 linhas: o do reel não cabe no quadro largo
+            # e a altura que o corte escolheu pro reel cai no queixo: desce pra perto da borda
+            m.run("captions.setStyle", {"track": trilha, "size": o.legenda_tamanho, "anchor": "bottom", "margin": 0.1})
     if o.motion:
         item = m.run("file.import", {"paths": [os.path.abspath(o.motion)]})["items"][0]
         m.run("sequence.addTracks", {"video": 1, "audio": 0})
         mc = m.run("timeline.place", {"item": item, "track": "V2", "seconds": o.motion_em})["clips"][0]
         if h > w:
             m.run("clip.fitToFrame", {"clips": [mc]})
+            # a legenda do corte fica a 20% da borda de baixo: a faixa sobe pra não pisar nela
+            m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "position", "value": [w / 2, h / 2 - 220.0]})
         else:
             m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "scale", "value": 100.0})
             m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "position", "value": [540.0, 240.0 * h / 1080]})
