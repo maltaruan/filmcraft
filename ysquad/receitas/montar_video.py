@@ -3,7 +3,8 @@
 Uso:
     python3 -I montar_video.py PASTA_DO_CORTE SAIDA_SEM_EXTENSAO
         [--formato 9x16|16x9|4x3] [--motion CLIPE.mov --motion-em 0.5]
-        [--cor] [--sem-legenda | --legenda-viva] [--legenda-tamanho 72] [--cli CAMINHO_DO_filmcraft-cli]
+        [--cor] [--sem-legenda | --legenda-viva] [--legenda-tamanho 72]
+        [--musica TRILHA --musica-db -18] [--sem-voz] [--lufs -14] [--cli CAMINHO_DO_filmcraft-cli]
 
 PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legenda.srt`).
 
@@ -27,6 +28,9 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
   broll = o trecho aprovado (pela get-brolls) cobre a fala da primeira à última palavra, numa
   trilha acima do vídeo, sem som, preenchendo o quadro; "zoom" aproxima devagar até a escala dada.
   Camadas, de baixo pra cima: vídeo, B-roll, motion, legenda viva.
+- Voz (padrão, --sem-voz desliga): Essential Sound de diálogo com limpeza leve (ruído, sala,
+  graves de manuseio, compressor, EQ "Balanced Voice"). --musica entra na A2 como música, abaixando
+  sozinha sob a fala (ducking). A exportação normaliza o volume pra --lufs (-14, Instagram e YouTube).
 - Exporta H.264 com o chip de vídeo do Mac (`hardwareEncoding: auto`).
 """
 import argparse, glob, json, os, re, subprocess, sys, time, urllib.parse
@@ -36,6 +40,10 @@ sys.path.insert(0, AQUI)
 import legenda_viva  # noqa: E402
 TPS = 254_016_000_000
 TAMANHOS = {"9x16": (1080, 1920), "16x9": (1920, 1080), "4x3": (1440, 1080)}
+# limpeza leve: o que a fala de quarto/escritório costuma pedir, sem deixar a voz "processada"
+VOZ = {"repair.noise.on": True, "repair.noise.amount": 3.0, "repair.reverb.on": True, "repair.reverb.amount": 2.0,
+       "repair.rumble.on": True, "repair.rumble.amount": 4.0, "clarity.dynamics.on": True, "clarity.dynamics.amount": 4.0,
+       "clarity.eq.on": True, "clarity.eq.amount": 4.0, "clarity.eq_preset": "Balanced Voice"}
 COR = {"exposure": 0.3, "contrast": 15, "saturation": 115, "highlights": -20, "shadows": 10}
 
 
@@ -190,6 +198,10 @@ def main():
     a.add_argument("--cor", action="store_true")
     a.add_argument("--sem-legenda", action="store_true")
     a.add_argument("--legenda-viva", action="store_true")
+    a.add_argument("--musica")
+    a.add_argument("--musica-db", type=float, default=-18.0, help="nível da música sem fala")
+    a.add_argument("--sem-voz", action="store_true")
+    a.add_argument("--lufs", type=float, default=-14.0)
     a.add_argument("--legenda-tamanho", type=float, default=72.0, help="16x9/4x3, px por 1080 linhas")
     a.add_argument("--cli", default=os.path.join(AQUI, "..", "..", "target", "release", "filmcraft-cli"))
     o = a.parse_args()
@@ -262,6 +274,20 @@ def main():
         else:
             m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "scale", "value": 100.0})
             m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "position", "value": [540.0, 240.0 * h / 1080]})
+    falas = [c["clip"] for c in seq["audio"][0]["items"]]
+    if not o.sem_voz:
+        m.run("essentialSound.setType", {"clips": falas, "type": "dialogue"})
+        m.run("essentialSound.set", {"clips": falas, "values": VOZ})
+    if o.musica:
+        item = m.run("file.import", {"paths": [os.path.abspath(o.musica)]})["items"][0]
+        dur = round(seq["duration"])
+        mus = m.run("timeline.place", {"item": item, "audioTrack": "new", "time": 0, "duration": dur, "video": False})["clips"]
+        m.run("essentialSound.setType", {"clips": mus, "type": "music"})
+        m.run("essentialSound.set", {"clips": mus, "values": {"volume.on": True, "volume.level_db": o.musica_db, "ducking.enabled": True,
+                                                              "ducking.reduce_db": -12.0, "ducking.fade_s": 0.4}})
+        duck = m.run("essentialSound.generateDucking", {"clips": mus})
+        print(f"música: ducking {json.dumps(duck)[:200]}", file=sys.stderr)
+
     if viva:
         saida, erro = legenda.communicate()
         if legenda.returncode != 0:
@@ -272,7 +298,8 @@ def main():
 
     t = time.time()
     r = m.run("file.exportMedia", {"path": os.path.abspath(o.saida) + ".mp4", "format": "h264", "hardwareEncoding": "auto",
-                                  "width": w, "height": h, "burnCaptions": not o.sem_legenda and not viva, "wait": True})
+                                  "width": w, "height": h, "burnCaptions": not o.sem_legenda and not viva,
+                                  "loudnessLufs": o.lufs, "wait": True})
     m.fechar()
     print(f"exportado em {time.time() - t:.1f} s: {json.dumps(r.get('result', r))}")
 
