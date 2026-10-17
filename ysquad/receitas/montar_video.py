@@ -3,7 +3,7 @@
 Uso:
     python3 -I montar_video.py PASTA_DO_CORTE SAIDA_SEM_EXTENSAO
         [--formato 9x16|16x9|4x3]
-        [--cor] [--sem-legenda | --legenda-viva [ESTILO] | --amostras-legenda PASTA] [--legenda-tamanho 72]
+        [--cor] [--sem-legenda | --legenda-viva LEGENDA.mov] [--legenda-tamanho 72]
         [--musica TRILHA --musica-db -18] [--sem-voz] [--lufs -14] [--sabor LC-709TypeA] [--sem-log] [--cli CAMINHO_DO_filmcraft-cli]
 
 PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legenda.srt`).
@@ -18,10 +18,9 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
 - --cor: Lumetri leve (exposição, contraste, saturação, altas luzes, sombras); em log fica de fora
   salvo se pedido, porque a conversão já entrega a imagem pronta.
 - A legenda vem dos <title> do FCPXML (o `.srt` só se o corte não tiver) e sai gravada na imagem.
-- --legenda-viva [ESTILO]: em vez da legenda fixa, a camada animada do `legenda_viva.py`
-  (HyperFrames), renderizada em paralelo e posta na trilha de cima. Estilos: caixa (padrão),
-  acende, pop, acumula, limpa. --amostras-legenda PASTA exporta sem legenda e gera, na pasta, um
-  vídeo curto e um quadro de cada estilo sobre o próprio corte (folha.png), pra escolher.
+- --legenda-viva LEGENDA.mov: em vez da legenda fixa, a legenda animada pronta do EffectCraft
+  (`~/effectcraft/ysquad/receitas/legenda_viva.py`), conferida como as cenas de motion
+  (transparência e tamanho do vídeo) e posta a 100 % na trilha de cima, do início do corte.
 - efeitos.json na pasta do corte (opcional), escrito por quem leu a fala, com índices de palavra
   do `indice.py` (inclusivos):
     {"zoom": [{"de": 16, "ate": 18, "escala": 115, "entrada": "seco|suave"}],
@@ -49,7 +48,7 @@ import argparse, glob, json, os, re, subprocess, sys, time, urllib.parse
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, AQUI)
-import legenda_viva  # noqa: E402
+import corte as cortefala  # noqa: E402
 TPS = 254_016_000_000
 TAMANHOS = {"9x16": (1080, 1920), "16x9": (1920, 1080), "4x3": (1440, 1080)}
 # limpeza leve: o que a fala de quarto/escritório costuma pedir, sem deixar a voz "processada"
@@ -134,7 +133,7 @@ def cena_pronta(e, quadro):
     """Confere a cena do EffectCraft: existe, tem transparência (ProRes 4444) e o tamanho do vídeo."""
     arq = e.get("arquivo", "")
     if not os.path.isfile(arq):
-        sys.exit(f"motion {e}: arquivo não existe")
+        sys.exit(f"cena {arq or e}: arquivo não existe")
     r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,profile,pix_fmt,width,height",
                         "-of", "json", arq], capture_output=True, text=True)
     v = (json.loads(r.stdout or "{}").get("streams") or [{}])[0]
@@ -152,8 +151,8 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro):
     if not os.path.exists(caminho):
         return
     plano = json.load(open(caminho, encoding="utf-8"))
-    _, trechos = legenda_viva.frases_do_corte(xml)
-    pal = legenda_viva.palavras_indexadas(os.path.join(corte, "transcript.json"), trechos)
+    _, trechos = cortefala.frases_do_corte(xml)
+    pal = cortefala.palavras_indexadas(os.path.join(corte, "transcript.json"), trechos)
     fw, fh = formato_da_fonte(xml)
     um_quadro = TPS // 25
 
@@ -275,8 +274,7 @@ def main():
     a.add_argument("--formato", choices=TAMANHOS, default="9x16")
     a.add_argument("--cor", action="store_true")
     a.add_argument("--sem-legenda", action="store_true")
-    a.add_argument("--legenda-viva", nargs="?", const="caixa", choices=list(legenda_viva.ESTILOS))
-    a.add_argument("--amostras-legenda", metavar="PASTA")
+    a.add_argument("--legenda-viva", metavar="LEGENDA.mov", help="a legenda animada pronta do EffectCraft")
     a.add_argument("--musica")
     a.add_argument("--musica-db", type=float, default=-18.0, help="nível da música sem fala")
     a.add_argument("--sem-voz", action="store_true")
@@ -291,16 +289,7 @@ def main():
     if len(xml) != 1:
         sys.exit(f"esperava um .fcpxml em {o.corte}, achei {len(xml)}")
     w, h = TAMANHOS[o.formato]
-    if o.amostras_legenda:
-        o.sem_legenda = True
-    viva = o.legenda_viva and not o.sem_legenda
-    tam, centro = (90, 0.8) if h > w else (round(o.legenda_tamanho * h / 1080), 0.86)
-    if viva:
-        # renderiza enquanto o FilmCraft monta; no reel, a altura que o corte escolheu (80 %)
-        mov = os.path.abspath(o.saida) + "_legenda.mov"
-        legenda = subprocess.Popen([sys.executable, "-I", os.path.join(AQUI, "legenda_viva.py"), o.corte, mov, "--estilo", o.legenda_viva,
-                                    "--largura", str(w), "--altura", str(h), "--tamanho", str(tam), "--centro", str(centro)],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    viva = cena_pronta({"arquivo": o.legenda_viva}, (w, h)) if o.legenda_viva and not o.sem_legenda else None
 
     m = Mcp(cli)
     imp = m.run("file.import", {"paths": [os.path.abspath(xml[0])]})
@@ -368,12 +357,9 @@ def main():
         print(f"música: ducking {json.dumps(duck)[:200]}", file=sys.stderr)
 
     if viva:
-        saida, erro = legenda.communicate()
-        if legenda.returncode != 0:
-            sys.exit(f"legenda viva falhou: {erro[-1500:]}")
-        item = m.run("file.import", {"paths": [mov]})["items"][0]
-        lc = m.run("timeline.place", {"item": item, "track": "new", "seconds": 0.0})["clips"][0]
-        m.run("clip.fitToFrame", {"clips": [lc]})
+        # pronta do EffectCraft: a 100 %, sem som, na trilha de cima
+        item = m.run("file.import", {"paths": [viva]})["items"][0]
+        m.run("timeline.place", {"item": item, "track": "new", "seconds": 0.0, "audio": False})
 
     t = time.time()
     r = m.run("file.exportMedia", {"path": os.path.abspath(o.saida) + ".mp4", "format": "h264", "hardwareEncoding": "auto", "gpuRendering": "auto",
@@ -381,18 +367,6 @@ def main():
                                   "loudnessLufs": o.lufs, "wait": True})
     m.fechar()
     print(f"exportado em {time.time() - t:.1f} s: {json.dumps(r.get('result', r))}")
-    if o.amostras_legenda:
-        pasta = os.path.abspath(o.amostras_legenda)
-        os.makedirs(pasta, exist_ok=True)
-        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", os.path.abspath(o.saida) + ".mp4", "-t", "6.5",
-                        "-c:v", "h264_videotoolbox", "-b:v", "16M", "-c:a", "aac", os.path.join(pasta, "fundo.mp4")], check=True)
-        r = subprocess.run([sys.executable, "-I", os.path.join(AQUI, "legenda_viva.py"), o.corte, pasta, "--amostras", "--de", "0",
-                            "--largura", str(w), "--altura", str(h), "--tamanho", str(tam), "--centro", str(centro)],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            sys.exit(f"amostras falharam: {r.stderr[-1500:]}")
-        print(f"amostras: {r.stdout.strip()}")
-
 
 if __name__ == "__main__":
     main()
