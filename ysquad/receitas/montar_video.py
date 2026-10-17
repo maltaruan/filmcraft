@@ -2,7 +2,7 @@
 
 Uso:
     python3 -I montar_video.py PASTA_DO_CORTE SAIDA_SEM_EXTENSAO
-        [--formato 9x16|16x9|4x3] [--motion CLIPE.mov --motion-em 0.5]
+        [--formato 9x16|16x9|4x3]
         [--cor] [--sem-legenda | --legenda-viva [ESTILO] | --amostras-legenda PASTA] [--legenda-tamanho 72]
         [--musica TRILHA --musica-db -18] [--sem-voz] [--lufs -14] [--sabor LC-709TypeA] [--sem-log] [--cli CAMINHO_DO_filmcraft-cli]
 
@@ -11,8 +11,6 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
 - 9x16: o corte vertical encaixado em 1080x1920.
 - 16x9 / 4x3: preenche o quadro com o foco acompanhando o rosto (`../rosto/acompanhar.py`,
   Vision do macOS), mapeado do tempo da fonte para o tempo de cada trecho do corte.
-- --motion: clipe com transparência (ex.: HyperFrames `--format mov`) na V2. Vertical, encaixa
-  no quadro; horizontal, entra a 100 % no terço de baixo à esquerda.
 - Log da Sony (S-Log2 / S-Log3, lido do XML do vídeo de origem): `../cor/log_709.py --auto` gera a
   LUT de entrada do corte (modo neutro: o tratamento do Ruan medido, branco neutralizado, exposição
   pela pele; `--sabor` troca pela LUT oficial da Sony) e
@@ -29,19 +27,18 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
     {"zoom": [{"de": 16, "ate": 18, "escala": 115, "entrada": "seco|suave"}],
      "desfoque": [{"de": 56, "ate": 58, "forca": 40, "sentido": "abre|fecha"}],
      "broll": [{"de": 61, "ate": 64, "arquivo": "/caminho/trecho.mp4", "inicio": 0.0, "zoom": 108}],
-     "motion": [{"de": 12, "ate": 18, "arquivo": "/caminho/cena.mov", "modo": "quadro", "antes": 0.1, "saida": 0.4}]}
+     "motion": [{"de": 12, "ate": 18, "arquivo": "/caminho/cena.mov", "antes": 0.1, "saida": 0.4}]}
   zoom = efeito Transform centrado no rosto, por cima do enquadramento: "seco" corta pra escala
   na primeira palavra e volta no fim da última; "suave" aproxima devagar até o fim e corta de volta.
   desfoque = Gaussian Blur: "abre" vai da força a zero (foco que chega), "fecha" de zero à força.
   broll = o trecho aprovado (pela get-brolls) cobre a fala da primeira à última palavra, numa
   trilha acima do vídeo, sem som, preenchendo o quadro; "zoom" aproxima devagar até a escala dada.
-  motion = cena animada do Nolan (`~/motion-ysquad/FILMCRAFT.md`), .mov com transparência no
-  tamanho do quadro, encaixada no quadro e sem som, de `antes` segundos antes da primeira palavra
-  (0 a 0,1) até `saida` segundos depois da última. Modos: "quadro" (padrão) por cima do vídeo;
-  "cobre" a cena é opaca e esconde o vídeo; "metade" (só no 9x16) a cena fica na metade de cima e o
-  rosto desce pra metade de baixo durante ela (Transform e Crop no vídeo, com quadros-chave hold).
-  As cenas vão numa trilha de motion, em sequência; uma que se sobrepõe a outra abre outra trilha.
-  Camadas, de baixo pra cima: vídeo, B-roll, motion, --motion, legenda viva.
+  motion = cena de motion pronta do EffectCraft (`~/effectcraft`, o fork que cria, anima, posiciona e
+  dimensiona): ProRes 4444 com transparência, já no tamanho do vídeo final e no lugar. A receita só
+  confere arquivo, transparência e tamanho (diferente do vídeo: para, sem encaixar nem redimensionar)
+  e põe a cena a 100 %, sem som, de `antes` segundos antes da primeira palavra (0 a 0,1) até `saida`
+  segundos depois da última. Cenas em sequência numa trilha; uma que se sobrepõe abre outra.
+  Camadas, de baixo pra cima: vídeo, B-roll, motion, legenda viva.
 - Voz (padrão, --sem-voz desliga): Essential Sound de diálogo com limpeza leve (ruído, sala,
   graves de manuseio, compressor, EQ "Balanced Voice"). --musica entra na A2 como música, abaixando
   sozinha sob a fala (ducking). A exportação normaliza o volume pra --lufs (-14, Instagram e YouTube).
@@ -133,7 +130,20 @@ def formato_da_fonte(fcpxml):
     return (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
 
 
-MODOS_MOTION = ("quadro", "cobre", "metade")
+def cena_pronta(e, quadro):
+    """Confere a cena do EffectCraft: existe, tem transparência (ProRes 4444) e o tamanho do vídeo."""
+    arq = e.get("arquivo", "")
+    if not os.path.isfile(arq):
+        sys.exit(f"motion {e}: arquivo não existe")
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,profile,pix_fmt,width,height",
+                        "-of", "json", arq], capture_output=True, text=True)
+    v = (json.loads(r.stdout or "{}").get("streams") or [{}])[0]
+    if v.get("codec_name") != "prores" or "4444" not in str(v.get("profile", "")) or not str(v.get("pix_fmt", "")).startswith("yuva"):
+        sys.exit(f"cena {arq} não tem transparência (é {v.get('codec_name')} {v.get('profile')} {v.get('pix_fmt')}): "
+                 "exporte do EffectCraft em ProRes 4444 com alfa")
+    if (v.get("width"), v.get("height")) != quadro:
+        sys.exit(f"cena {arq} tem {v.get('width')}x{v.get('height')}, o vídeo é {quadro[0]}x{quadro[1]}: refaça no EffectCraft")
+    return os.path.abspath(arq)
 
 
 def aplicar_efeitos(m, corte, xml, clipes, focos, quadro):
@@ -156,18 +166,12 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro):
     cenas = []
     for e in plano.get("motion", []):
         t0, t1 = faixa(e)
-        if not os.path.isfile(e.get("arquivo", "")):
-            sys.exit(f"motion {e}: arquivo não existe")
-        modo, antes, saida = e.get("modo", "quadro"), float(e.get("antes", 0.0)), float(e.get("saida", 0.0))
-        if modo not in MODOS_MOTION:
-            sys.exit(f"motion {e}: modo deve ser {', '.join(MODOS_MOTION)}")
+        antes, saida = float(e.get("antes", 0.0)), float(e.get("saida", 0.0))
         if not 0.0 <= antes <= 0.1:
             sys.exit(f"motion {e}: antes vai de 0 a 0,1 s")
         if saida < 0:
             sys.exit(f"motion {e}: saida não pode ser negativa")
-        if modo == "metade" and quadro[1] <= quadro[0]:
-            sys.exit(f"motion {e}: o modo metade é do 9x16")
-        cenas.append((max(t0 - antes, 0.0), t1 + saida, modo, os.path.abspath(e["arquivo"])))
+        cenas.append((max(t0 - antes, 0.0), t1 + saida, cena_pronta(e, quadro)))
 
     def pedacos(t0, t1):
         """(clipe, mídia em t0, mídia em t1) de cada clipe que a faixa toca."""
@@ -191,7 +195,7 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro):
         m.run("effects.setKeyframe", {"clip": cid, "effect": efeito, "param": param, "mediaTime": t, "value": v})
         m.run("effects.setInterpolation", {"clip": cid, "effect": efeito, "param": param, "mediaTime": int(t), "interpolation": interp})
 
-    com_transform, com_blur, com_metade = {}, set(), set()
+    com_transform, com_blur = {}, set()
 
     def transform_no_rosto(c, base):
         """Transform centrado no rosto (âncora e posição no mesmo ponto: não move nada sozinho)."""
@@ -250,31 +254,16 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro):
             kf(bc, "transform", "scale_height", c["sourceIn"], 100.0, "linear")
             kf(bc, "transform", "scale_height", c["sourceOut"], float(r["zoom"]), "hold")
     trilhas_motion = []  # [nome, fim da última cena]
-    for t0, t1, modo, arquivo in sorted(cenas):
+    for t0, t1, arquivo in sorted(cenas):
+        # a cena chega pronta: a 100 %, no centro do quadro, sem encaixe nem posição
         livre = next((tr for tr in trilhas_motion if tr[1] <= t0 + 1e-6), None)
         item = m.run("file.import", {"paths": [arquivo]})["items"][0]
-        mc = m.run("timeline.place", {"item": item, "track": livre[0] if livre else "new", "time": round(t0 * TPS),
-                                      "duration": round((t1 - t0) * TPS), "audio": False})["clips"][0]
+        m.run("timeline.place", {"item": item, "track": livre[0] if livre else "new", "time": round(t0 * TPS),
+                                 "duration": round((t1 - t0) * TPS), "audio": False})
         if livre:
             livre[1] = t1
         else:
             trilhas_motion.append([f"V{len(m.run('sequence.inspect')['video'])}", t1])
-        m.run("clip.fitToFrame", {"clips": [mc]})
-        if modo == "metade":
-            # o rosto (âncora do Transform) desce pra 3/4 da altura e a metade de cima do vídeo é
-            # cortada; a cena ocupa a metade de cima. Só durante a cena: quadros-chave hold.
-            for c, a, b, base in pedacos(t0, t1):
-                cid = c["clip"]
-                ponto = transform_no_rosto(c, base)
-                if cid not in com_metade:
-                    kf(cid, "transform", "position", base, ponto, "hold")
-                    m.run("effects.apply", {"clips": [cid], "effect": "Crop"})
-                    kf(cid, "crop", "top", base, 0.0, "hold")
-                    com_metade.add(cid)
-                kf(cid, "transform", "position", a, [ponto[0], 0.75 * fh], "hold")
-                kf(cid, "transform", "position", b + um_quadro, ponto, "hold")
-                kf(cid, "crop", "top", a, 50.0, "hold")
-                kf(cid, "crop", "top", b + um_quadro, 0.0, "hold")
     print(f"efeitos: {len(plano.get('zoom', []))} zoom, {len(plano.get('desfoque', []))} desfoque, "
           f"{len(plano.get('broll', []))} B-roll, {len(cenas)} motion em {len(trilhas_motion)} trilha(s)", file=sys.stderr)
 
@@ -284,8 +273,6 @@ def main():
     a.add_argument("corte")
     a.add_argument("saida")
     a.add_argument("--formato", choices=TAMANHOS, default="9x16")
-    a.add_argument("--motion")
-    a.add_argument("--motion-em", type=float, default=0.5)
     a.add_argument("--cor", action="store_true")
     a.add_argument("--sem-legenda", action="store_true")
     a.add_argument("--legenda-viva", nargs="?", const="caixa", choices=list(legenda_viva.ESTILOS))
@@ -366,16 +353,6 @@ def main():
             # o tamanho é por 1080 linhas: o do reel não cabe no quadro largo
             # e a altura que o corte escolheu pro reel cai no queixo: desce pra perto da borda
             m.run("captions.setStyle", {"track": trilha, "size": o.legenda_tamanho, "anchor": "bottom", "margin": 0.1})
-    if o.motion:
-        item = m.run("file.import", {"paths": [os.path.abspath(o.motion)]})["items"][0]
-        mc = m.run("timeline.place", {"item": item, "track": "new", "seconds": o.motion_em})["clips"][0]
-        if h > w:
-            m.run("clip.fitToFrame", {"clips": [mc]})
-            # a legenda do corte fica a 20% da borda de baixo: a faixa sobe pra não pisar nela
-            m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "position", "value": [w / 2, h / 2 - 220.0]})
-        else:
-            m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "scale", "value": 100.0})
-            m.run("effects.setParam", {"clip": mc, "effect": "motion", "param": "position", "value": [540.0, 240.0 * h / 1080]})
     falas = [c["clip"] for c in seq["audio"][0]["items"]]
     if not o.sem_voz:
         m.run("essentialSound.setType", {"clips": falas, "type": "dialogue"})
