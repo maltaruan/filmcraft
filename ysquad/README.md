@@ -4,15 +4,17 @@ Ferramentas do nosso fork que ficam fora do produto (o editor continua em Rust p
 sólido pro uso da ySquad (reel, depois vídeo longo), não paridade com o Premiere.
 
 Divisão (17/10): o FilmCraft só monta (corte, cor, voz, música, B-roll, legenda fixa, exportação).
-Criar, animar, posicionar e dimensionar cena de motion e a legenda viva é do EffectCraft (`~/effectcraft`, fork
-maltaruan/effectcraft): a cena chega pronta e a receita só a põe no tempo das palavras. O código do
+Criar, animar, posicionar e dimensionar motion é do Nolan (`~/motion-ysquad`): HyperFrames ou Remotion,
+e o EffectCraft (`~/effectcraft`) só no que depende da filmagem (rastreio, recorte, efeito na imagem).
+A cena chega pronta e a receita só a põe no tempo das palavras. O modo `metade` fica aqui: ele mexe no
+vídeo do rosto, é montagem. O código do
 produto (`crates/`, gráficos, modelos `.fcgt`) é do upstream e não é mexido aqui.
 
 - `receitas/montar_video.py PASTA_DO_CORTE SAIDA`: do corte da skill `cortar-fala` ao vídeo final,
   pelo FilmCraft sem janela, exportando pela placa de vídeo e pelo chip de vídeo do Mac. Formato
   9x16, 16x9 ou 4x3 (horizontal com o foco no rosto); legenda fixa ou `--legenda-viva LEGENDA.mov`
-  (pronta do EffectCraft, `~/effectcraft/ysquad/receitas/legenda_viva.py`); `efeitos.json` no
-  corte (zoom no rosto, desfoque, B-roll e cenas de motion prontas do EffectCraft, por índice de
+  (pronta do HyperFrames, `~/motion-ysquad/receitas/legenda_viva.py`); `efeitos.json` no
+  corte (zoom no rosto, desfoque, B-roll, cenas de motion prontas e o modo `metade`, por índice de
   palavra); voz limpa,
   `--musica` com ducking e -14 LUFS; log da Sony e vídeo de celular em HDR convertidos sozinhos
   (ver `cor/`).
@@ -40,13 +42,14 @@ Cor (17/10): o padrão do Ruan é o `naruto 2.mov`, medido pixel a pixel sobre o
 automático (exposição e branco pela pele, 25 quadros) fica a 2,9 níveis do tratamento dele no C0190.
 O visual do `discord.mov` (neutro, pele 100) fica como `--visual discord`.
 
-Motion (17/10): chave `motion` do `efeitos.json` com cenas prontas do EffectCraft, ProRes 4444 com
-transparência no tamanho do vídeo final. A receita confere arquivo, transparência e tamanho (se não
-bate, para e pede pra refazer no EffectCraft) e põe a cena a 100 %, sem mexer, do `antes` ao `saida`.
+Motion (17/10): chave `motion` do `efeitos.json` com cenas prontas (HyperFrames, Remotion ou
+EffectCraft), ProRes 4444 com transparência no tamanho do vídeo final. A receita confere arquivo,
+transparência e tamanho (se não bate, para e pede pra refazer a cena) e põe a cena a 100 %, sem
+mexer, do `antes` ao `saida`. `"modo": "metade"` (9x16) desce o rosto pra metade de baixo durante a cena.
 Camadas, de baixo pra cima: vídeo, B-roll, motion, legenda. Testado no `target/fixtures/corte_motion`:
 a cena aparece no tempo das palavras, no pixel em que veio, com a legenda por cima (a fixa e a viva).
 
-Legenda viva (17/10): passou pro EffectCraft. A receita recebe o `.mov` pronto em `--legenda-viva`,
+Legenda viva (17/10): saiu desta camada e mora em `~/motion-ysquad/receitas/legenda_viva.py` (HyperFrames). A receita recebe o `.mov` pronto em `--legenda-viva`,
 confere como as cenas (transparência e tamanho) e põe a 100 % na trilha de cima.
 
 Celular (17/10): o editor clareava o vídeo do iPhone (HDR) e estourava as paredes. A correção ficou
@@ -54,7 +57,7 @@ nesta camada, sem tocar no produto: `cor/hlg_709.py` refaz o jeito da Apple (tel
 gama 0,846) e a receita aplica sozinha no vídeo principal e no B-roll. Medido no vídeo da câmera
 frontal (`ec1beaea….MOV`): 0,67 nível do macOS no quadro, 2,1 no MP4 final (`target/fixtures/corte_celular`).
 
-Pendente: legenda viva lenta (~29 s pra 31 s de fala), agora do lado do EffectCraft.
+Pendente: legenda viva lenta (~29 s pra 31 s de fala), agora no `~/motion-ysquad`.
 Motion, B-roll real (incluindo B-roll de celular) e música testados só com material sintético.
 
 Riscos: a escala de entrada das LUTs da Sony (código cheio x faixa de vídeo) não foi confirmada com
