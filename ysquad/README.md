@@ -24,8 +24,11 @@ Pronto: reel completo por receita; cor do Lumetri inteira na placa (curvas, roda
 LUT de entrada como tabela 3D); CLI com Metal; conversão neutra do log validada a 3,7 níveis do
 tratamento do Ruan no C0204.
 
-Pendente: alvo de pele do modo neutro (100) vem de um vídeo só, mais escuro, e escurece cena clara;
-falta um segundo vídeo tratado por ele. Vídeo de celular. Legenda viva lenta (~24 s). Motion por cena
+Alvo de pele do modo neutro: 110 (17/10), média de dois vídeos tratados pelo Ruan (`discord.mov`
+100, `naruto 2.mov` 123, cenas de mesmo brilho). A curva e a saturação continuam medidas só no par
+discord/C0204: o bruto do naruto não está no disco.
+
+Pendente: vídeo de celular. Legenda viva lenta (~24 s). Motion por cena
 no `efeitos.json`. B-roll real e música testados só com material sintético.
 
 Riscos: a escala de entrada das LUTs da Sony (código cheio x faixa de vídeo) não foi confirmada com

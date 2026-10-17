@@ -23,10 +23,12 @@ Fontes: S-Log3 e S-Gamut3/.Cine, "Technical Summary for S-Gamut3.Cine/S-Log3 and
 """
 import argparse, json, math, os, re, statistics, subprocess, sys, tempfile
 
-# Luma (8 bits, Rec.709) da pele no tratamento à mão do Ruan: medido em 16/10/2026 no `discord.mov`
-# (exportado do Resolve, bruto C0204), mesmo método da exposição automática (Vision, janela central do
-# rosto, mediana de 9 quadros): 99,7. O sony4k_60s dava 158, mas a origem dele não está confirmada.
-PELE_ALVO = 100.0
+# Luma (8 bits, Rec.709) da pele no tratamento à mão do Ruan, mesmo método da exposição automática
+# (Vision, janela central do rosto, mediana de 9 quadros), em dois vídeos exportados por ele:
+# `discord.mov` (bruto C0204) 99,7 e `naruto 2.mov` (17/10/2026, bruto fora do disco) 122,6. As duas
+# cenas têm o mesmo brilho médio (48 e 54), então a diferença é do tratamento, não da luz: alvo na
+# média. O sony4k_60s dava 158, mas a origem dele não está confirmada.
+PELE_ALVO = 110.0
 ROSTO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rosto")
 
 RESOLVE = "/Library/Application Support/Blackmagic Design/DaVinci Resolve/LUT"
