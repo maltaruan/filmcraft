@@ -14,12 +14,16 @@ produto (`crates/`, gráficos, modelos `.fcgt`) é do upstream e não é mexido 
   (pronta do EffectCraft, `~/effectcraft/ysquad/receitas/legenda_viva.py`); `efeitos.json` no
   corte (zoom no rosto, desfoque, B-roll e cenas de motion prontas do EffectCraft, por índice de
   palavra); voz limpa,
-  `--musica` com ducking e -14 LUFS; log da Sony convertido sozinho (ver `cor/`).
+  `--musica` com ducking e -14 LUFS; log da Sony e vídeo de celular em HDR convertidos sozinhos
+  (ver `cor/`).
 - `receitas/corte.py`: o corte do `cortar-fala` no tempo do corte (frases, trechos e o tempo de cada
   palavra pelo índice do `indice.py`), usado pelos efeitos.
 - `cor/log_709.py`: S-Log2/S-Log3 da Sony para Rec.709 como LUT de entrada. Modo `neutro`
   (padrão): o tratamento à mão do Ruan medido (branco neutralizado, calor, curva e saturação dele),
   exposição pela pele, com `--visual naruto` (padrão, quente) ou `discord`; modo `sony`: LUT oficial.
+- `cor/hlg_709.py`: vídeo de celular em HDR (HLG, o padrão do iPhone) para Rec.709 como o celular
+  mostra numa tela comum, como LUT de entrada; a receita lê o clipe como Rec.709 pro FilmCraft não
+  converter o HLG antes. `--sem-celular` desliga.
 - `rosto/acompanhar.py VIDEO [--trechos a-b,...]`: `focusKeys` de `clip.fillFrame` acompanhando o
   rosto (Vision do macOS, `rosto/rosto.swift`).
 - MCP registrado no escopo do usuário: `filmcraft-headless` (sem janela, `--demo`) e `filmcraft`
@@ -45,9 +49,13 @@ a cena aparece no tempo das palavras, no pixel em que veio, com a legenda por ci
 Legenda viva (17/10): passou pro EffectCraft. A receita recebe o `.mov` pronto em `--legenda-viva`,
 confere como as cenas (transparência e tamanho) e põe a 100 % na trilha de cima.
 
-Pendente: vídeo de celular (HDR do iPhone: a correção é no código do produto, fora desta camada;
-aguarda decisão). Legenda viva lenta (~29 s pra 31 s de fala), agora do lado do EffectCraft.
-Motion, B-roll real e música testados só com material sintético.
+Celular (17/10): o editor clareava o vídeo do iPhone (HDR) e estourava as paredes. A correção ficou
+nesta camada, sem tocar no produto: `cor/hlg_709.py` refaz o jeito da Apple (tela de 100 cd/m²,
+gama 0,846) e a receita aplica sozinha no vídeo principal e no B-roll. Medido no vídeo da câmera
+frontal (`ec1beaea….MOV`): 0,67 nível do macOS no quadro, 2,1 no MP4 final (`target/fixtures/corte_celular`).
+
+Pendente: legenda viva lenta (~29 s pra 31 s de fala), agora do lado do EffectCraft.
+Motion, B-roll real (incluindo B-roll de celular) e música testados só com material sintético.
 
 Riscos: a escala de entrada das LUTs da Sony (código cheio x faixa de vídeo) não foi confirmada com
 cartão cinza (afeta ~3% dos tons médios no modo `sony`). Push pelo SSH só via

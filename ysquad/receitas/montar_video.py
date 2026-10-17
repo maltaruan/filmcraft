@@ -4,7 +4,7 @@ Uso:
     python3 -I montar_video.py PASTA_DO_CORTE SAIDA_SEM_EXTENSAO
         [--formato 9x16|16x9|4x3]
         [--cor] [--sem-legenda | --legenda-viva LEGENDA.mov] [--legenda-tamanho 72]
-        [--musica TRILHA --musica-db -18] [--sem-voz] [--lufs -14] [--sabor LC-709TypeA] [--sem-log] [--cli CAMINHO_DO_filmcraft-cli]
+        [--musica TRILHA --musica-db -18] [--sem-voz] [--lufs -14] [--sabor LC-709TypeA] [--sem-log] [--sem-celular] [--cli CAMINHO_DO_filmcraft-cli]
 
 PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legenda.srt`).
 
@@ -15,6 +15,10 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
   LUT de entrada do corte (modo neutro: o tratamento do Ruan medido, branco neutralizado, exposição
   pela pele; `--sabor` troca pela LUT oficial da Sony) e
   ela entra no Lumetri de cada trecho, na placa de vídeo. --sem-log desliga.
+- Celular em HDR (HLG, o padrão do iPhone; vídeo principal e B-roll): `../cor/hlg_709.py` gera a LUT
+  que refaz o jeito que o celular mostra o vídeo numa tela comum; o clipe é lido como Rec.709
+  (`clip.interpretFootage`), pro FilmCraft não converter o HLG antes, e a LUT entra no Lumetri.
+  Sem isso o editor clareia a imagem e estoura as paredes. --sem-celular desliga.
 - --cor: Lumetri leve (exposição, contraste, saturação, altas luzes, sombras); em log fica de fora
   salvo se pedido, porque a conversão já entrega a imagem pronta.
 - A legenda vem dos <title> do FCPXML (o `.srt` só se o corte não tiver) e sai gravada na imagem.
@@ -124,6 +128,23 @@ def converter_log(video, corte, sabor, trechos=None):
     return cube
 
 
+def converter_celular(m, video, item, clipes, pasta):
+    """Celular em HLG: o clipe lido como Rec.709 e a LUT do `hlg_709.py` no Lumetri. True se converteu."""
+    cor = os.path.join(AQUI, "..", "cor", "hlg_709.py")
+    d = json.loads(subprocess.run([sys.executable, "-I", cor, "--detectar", video], capture_output=True, text=True, check=True).stdout)
+    if not d.get("hlg"):
+        return False
+    cube = os.path.join(pasta, "hlg_709.cube")
+    if not os.path.exists(cube):
+        subprocess.run([sys.executable, "-I", cor, cube], capture_output=True, text=True, check=True)
+    m.run("clip.interpretFootage", {"items": [item], "colorSpace": "rec709"})
+    for cid in clipes:
+        m.run("effects.apply", {"clips": [cid], "effect": "Lumetri Color"})
+        m.run("lumetri.setInputLut", {"clip": cid, "path": cube})
+    print(f"celular: {os.path.basename(video)} em HLG, convertido como o celular mostra", file=sys.stderr)
+    return True
+
+
 def formato_da_fonte(fcpxml):
     m = re.search(r'<format [^>]*width="(\d+)" height="(\d+)"', open(fcpxml, encoding="utf-8").read())
     return (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
@@ -145,7 +166,7 @@ def cena_pronta(e, quadro):
     return os.path.abspath(arq)
 
 
-def aplicar_efeitos(m, corte, xml, clipes, focos, quadro):
+def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True):
     """Aplica o efeitos.json do corte nos clipes da V1. Tempo do corte -> tempo da mídia de cada clipe."""
     caminho = os.path.join(corte, "efeitos.json")
     if not os.path.exists(caminho):
@@ -245,6 +266,8 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro):
                                       "duration": round((t1 - t0) * TPS), "audio": False})["clips"][0]
         trilha_broll = trilha_broll or "V2"
         m.run("clip.fillFrame", {"clips": [bc]})
+        if celular:
+            converter_celular(m, os.path.abspath(r["arquivo"]), item, [bc], corte)
         if r.get("zoom"):
             # o clipe como ficou (o encaixe arredonda pro quadro)
             c = next(x for tr in m.run("sequence.inspect")["video"] for x in tr["items"] if x["clip"] == bc)
@@ -280,6 +303,7 @@ def main():
     a.add_argument("--sem-voz", action="store_true")
     a.add_argument("--sabor", help="converter o log pela LUT oficial da Sony (LC-709, LC-709TypeA...) em vez do modo neutro")
     a.add_argument("--sem-log", action="store_true")
+    a.add_argument("--sem-celular", action="store_true", help="não converter vídeo de celular em HLG")
     a.add_argument("--lufs", type=float, default=-14.0)
     a.add_argument("--legenda-tamanho", type=float, default=72.0, help="16x9/4x3, px por 1080 linhas")
     a.add_argument("--cli", default=os.path.join(AQUI, "..", "..", "target", "release", "filmcraft-cli"))
@@ -318,15 +342,16 @@ def main():
             else:
                 m.run("clip.fillFrame", {"clips": [c["clip"]]})
 
-    aplicar_efeitos(m, o.corte, xml[0], clipes, focos, (w, h))
+    aplicar_efeitos(m, o.corte, xml[0], clipes, focos, (w, h), not o.sem_celular)
     ids = [c["clip"] for c in clipes]
     cube = None if o.sem_log else converter_log(video_do_fcpxml(xml[0]), o.corte, o.sabor, trechos_da_fonte(clipes))
+    hlg = not cube and not o.sem_celular and converter_celular(m, video_do_fcpxml(xml[0]), clipes[0]["item"], ids, o.corte)
     if cube:
         for cid in ids:
             m.run("effects.apply", {"clips": [cid], "effect": "Lumetri Color"})
             m.run("lumetri.setInputLut", {"clip": cid, "path": cube})
     if o.cor:
-        if not cube:  # em log o Lumetri da conversão já está no clipe
+        if not (cube or hlg):  # em log e no celular o Lumetri da conversão já está no clipe
             m.run("effects.apply", {"clips": ids, "effect": "Lumetri Color"})
         for cid in ids:
             for k, v in COR.items():
