@@ -46,16 +46,17 @@ GAMA_DA_LUT = {"slog3": "sgamut3cine", "slog2": "sgamut"}
 # a forma importa), a saturação, o calor (ganhos r,g,b em luz de cena depois do branco neutralizado,
 # luminância mantida) e a luma da pele (Vision, janela central do rosto, mediana de 9 quadros).
 VISUAIS = {
-    # O padrão dele (17/10/2026): `naruto 2.mov`, bruto fora do disco, luz igual à dos brutos C0203-5.
-    # Curva casando os tons dos três brutos com os do naruto, ancorada na pele (abaixo dela com
-    # abaixo, acima com acima; o eixo é log2 da luminância sobre a da pele). Calor e saturação
-    # ajustados pela cor da pele dele (162,115,82; os três brutos ficam a até 3 níveis); conferido
-    # no fundo, que não entrou no ajuste: R/G 1,24-1,28 e B/G 0,78-0,81 contra 1,34 e 0,82 no naruto.
+    # O padrão dele (17/10/2026): `naruto 2.mov` sobre o bruto C0190 (S-Log2), 10 quadros alinhados
+    # quadro a quadro (correlação 0,993 ou mais), ajuste com erro médio de 2,9 níveis em 8 bits. O
+    # calor é o que ele deixa por cima do branco neutralizado (âmbar: vermelho +4 %, azul -13 %).
+    # Pele: no vídeo tratado ela mede 119,5 nos mesmos quadros (o modelo dá 119,4); medida no BRUTO
+    # pela própria exposição automática (Vision acha o rosto um pouco diferente no log lavado), 25 e
+    # 41 quadros nos trechos do corte dão 109,5 e 114,7 com a exposição dele: o alvo é 112, assim o
+    # automático devolve a exposição que ele usou.
     "naruto": {
-        "curva": [(-7.572, 2.7), (-5.062, 18.0), (-4.189, 27.9), (-3.559, 36.7), (-3.142, 44.2), (-2.801, 51.2),
-                  (-2.273, 58.9), (-1.635, 67.9), (-0.838, 86.7), (0.0, 122.6), (0.197, 128.2), (0.435, 134.2),
-                  (0.744, 141.1), (1.078, 150.8), (2.090, 184.1)],
-        "saturacao": 0.95, "calor": (1.08, 1.0, 0.82), "pele": 122.6,
+        "curva": [(-5.289, 2.7), (-4.629, 7.7), (-3.862, 16.4), (-3.133, 27.5), (-2.360, 39.9), (-1.628, 51.7),
+                  (-0.892, 65.1), (-0.129, 82.3), (0.628, 102.4), (1.373, 124.2), (2.125, 145.7), (2.824, 169.9)],
+        "saturacao": 1.12, "calor": (1.038, 1.0, 0.873), "pele": 112.0,
     },
     # 16/10/2026: 5 quadros do `discord.mov` alinhados ao bruto C0204 (S-Log2, correlação 0,996),
     # erro de 3,8 níveis. Acima de +2,08 quase não havia pixel: o ombro continua a inclinação medida.
@@ -425,7 +426,8 @@ def main():
         if o.sabor:
             o.lut = SABORES[o.curva][o.sabor]
         iv = [tuple(map(float, x.split("-"))) for x in o.intervalos.split(",")] if o.intervalos else None
-        r = amostras_de_pele(o.trecho or o.auto, intervalos=iv)
+        # 5 quadros oscilavam até meio ponto de luz entre sorteios; 25 ficam dentro de ~0,2
+        r = amostras_de_pele(o.trecho or o.auto, n=25, intervalos=iv)
         if r:
             if o.modo == "neutro":
                 o.ganhos = ",".join(map(str, branco_auto(r[2], o.curva, o.gama)))

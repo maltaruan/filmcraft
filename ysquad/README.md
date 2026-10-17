@@ -24,10 +24,10 @@ Pronto: reel completo por receita; cor do Lumetri inteira na placa (curvas, roda
 LUT de entrada como tabela 3D); CLI com Metal; conversão neutra do log validada a 3,7 níveis do
 tratamento do Ruan no C0204.
 
-Cor (17/10): o padrão do Ruan é o `naruto 2.mov` (quente, pele 123). Sem o bruto dele, a curva saiu
-casando os tons dos brutos C0203-5 (mesma luz) com os do naruto, ancorada na pele; calor e saturação
-pela cor da pele (a até 3 níveis), conferidos no fundo. O visual do `discord.mov` (neutro, pele 100)
-fica como `--visual discord`. A pele medida varia de quadro a quadro (106 a 133 nos três brutos).
+Cor (17/10): o padrão do Ruan é o `naruto 2.mov`, medido pixel a pixel sobre o bruto C0190
+(`/Volumes/SSD /C0190.MP4`): 10 quadros alinhados, curva, calor (âmbar) e saturação dele. Tudo
+automático (exposição e branco pela pele, 25 quadros) fica a 2,9 níveis do tratamento dele no C0190.
+O visual do `discord.mov` (neutro, pele 100) fica como `--visual discord`.
 
 Pendente: vídeo de celular. Legenda viva lenta (~24 s). Motion por cena
 no `efeitos.json`. B-roll real e música testados só com material sintético.
