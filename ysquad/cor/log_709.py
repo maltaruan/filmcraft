@@ -1,14 +1,15 @@
 """S-Log da Sony -> Rec.709: uma LUT de entrada por clipe, com a exposição corrigida em luz de cena.
 
-Dois modos. `neutro` (padrão) é o tratamento do Ruan medido: branco neutralizado, a curva de tom e a
-saturação que ele usava à mão no Resolve, sem visual de LUT. `sony` passa pela LUT oficial da Sony.
+Dois modos. `neutro` (padrão) é o tratamento do Ruan medido: branco neutralizado, o calor, a curva de
+tom e a saturação que ele usa à mão no Resolve, sem visual de LUT (`--visual naruto`, o padrão, ou
+`discord`). `sony` passa pela LUT oficial da Sony.
 
 Uso:
     python3 -I log_709.py SAIDA.cube --curva slog3|slog2 --gama sgamut3|sgamut3cine|sgamut
         [--exposicao -2.5] [--ganhos 1,1,1] [--lut LUT_DA_SONY.cube] [--n 65]
     python3 -I log_709.py --detectar VIDEO.MP4      (lê curva e gama do XML que a Sony grava no MP4)
-    python3 -I log_709.py SAIDA.cube --auto VIDEO.MP4 [--trecho CORTE.MP4]
-        (curva e gama do XML, exposição medida na pele: rosto pelo Vision, alvo PELE_ALVO)
+    python3 -I log_709.py SAIDA.cube --auto VIDEO.MP4 [--trecho CORTE.MP4] [--visual naruto|discord]
+        (curva e gama do XML, exposição medida na pele: rosto pelo Vision, alvo a pele do visual)
 
 O caminho, para cada cor da grade (o sinal do arquivo, 0 a 1):
   1. decodifica a curva da Sony (fórmulas publicadas) pra luz de cena, na gama da câmera;
@@ -23,12 +24,6 @@ Fontes: S-Log3 e S-Gamut3/.Cine, "Technical Summary for S-Gamut3.Cine/S-Log3 and
 """
 import argparse, json, math, os, re, statistics, subprocess, sys, tempfile
 
-# Luma (8 bits, Rec.709) da pele no tratamento à mão do Ruan, mesmo método da exposição automática
-# (Vision, janela central do rosto, mediana de 9 quadros), em dois vídeos exportados por ele:
-# `discord.mov` (bruto C0204) 99,7 e `naruto 2.mov` (17/10/2026, bruto fora do disco) 122,6. As duas
-# cenas têm o mesmo brilho médio (48 e 54), então a diferença é do tratamento, não da luz: alvo na
-# média. O sony4k_60s dava 158, mas a origem dele não está confirmada.
-PELE_ALVO = 110.0
 ROSTO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rosto")
 
 RESOLVE = "/Library/Application Support/Blackmagic Design/DaVinci Resolve/LUT"
@@ -46,20 +41,40 @@ SABORES = {
 GAMA_DA_LUT = {"slog3": "sgamut3cine", "slog2": "sgamut"}
 
 
-# O tratamento à mão do Ruan no Resolve, medido em 16/10/2026: 5 quadros do `discord.mov`
-# (exportado) alinhados ao bruto `C0204` (S-Log2, correlação 0,996), modelo ajustado com erro de
-# 3,8 níveis em 8 bits. Curva: log2 da luminância de cena (Rec.709, exposição do bruto) -> valor de
-# tela (0-255, gama 2.4). Acima de +2,08 quase não havia pixel: o ombro continua a inclinação medida
-# (31 níveis por ponto) até o branco. Saturação +11 %. Nas superfícies claras quase neutras ele
-# deixava azul/vermelho em 0,986 (o branco da câmera dava 0,908): branco neutralizado por inteiro.
-CURVA_RUAN = [(-5.308, 0.0), (-4.385, 10.7), (-3.462, 23.0), (-2.538, 37.8), (-1.615, 54.0), (-0.692, 72.2),
-              (0.231, 95.5), (1.154, 122.3), (2.077, 151.2)]
-SATURACAO_RUAN = 1.11
+# Os tratamentos à mão do Ruan no Resolve, medidos. Em cada um: a curva de tom (log2 da luminância de
+# cena Rec.709 -> valor de tela 0-255, gama 2.4; a exposição é resolvida depois, pela pele, então só
+# a forma importa), a saturação, o calor (ganhos r,g,b em luz de cena depois do branco neutralizado,
+# luminância mantida) e a luma da pele (Vision, janela central do rosto, mediana de 9 quadros).
+VISUAIS = {
+    # O padrão dele (17/10/2026): `naruto 2.mov`, bruto fora do disco, luz igual à dos brutos C0203-5.
+    # Curva casando os tons dos três brutos com os do naruto, ancorada na pele (abaixo dela com
+    # abaixo, acima com acima; o eixo é log2 da luminância sobre a da pele). Calor e saturação
+    # ajustados pela cor da pele dele (162,115,82; os três brutos ficam a até 3 níveis); conferido
+    # no fundo, que não entrou no ajuste: R/G 1,24-1,28 e B/G 0,78-0,81 contra 1,34 e 0,82 no naruto.
+    "naruto": {
+        "curva": [(-7.572, 2.7), (-5.062, 18.0), (-4.189, 27.9), (-3.559, 36.7), (-3.142, 44.2), (-2.801, 51.2),
+                  (-2.273, 58.9), (-1.635, 67.9), (-0.838, 86.7), (0.0, 122.6), (0.197, 128.2), (0.435, 134.2),
+                  (0.744, 141.1), (1.078, 150.8), (2.090, 184.1)],
+        "saturacao": 0.95, "calor": (1.08, 1.0, 0.82), "pele": 122.6,
+    },
+    # 16/10/2026: 5 quadros do `discord.mov` alinhados ao bruto C0204 (S-Log2, correlação 0,996),
+    # erro de 3,8 níveis. Acima de +2,08 quase não havia pixel: o ombro continua a inclinação medida.
+    # Nas superfícies claras quase neutras ele deixava azul/vermelho em 0,986: branco neutro, sem calor.
+    "discord": {
+        "curva": [(-5.308, 0.0), (-4.385, 10.7), (-3.462, 23.0), (-2.538, 37.8), (-1.615, 54.0), (-0.692, 72.2),
+                  (0.231, 95.5), (1.154, 122.3), (2.077, 151.2)],
+        "saturacao": 1.11, "calor": (1.0, 1.0, 1.0), "pele": 99.7,
+    },
+}
+VISUAL = "naruto"
+# A pele do padrão vale também pro modo `sony`. O sony4k_60s dava 158, mas a origem não está confirmada.
+PELE_ALVO = VISUAIS[VISUAL]["pele"]
 
 
-def tom_ruan(lg):
-    """Valor de tela (0-1, gama 2.4) para log2 da luminância de cena."""
-    xs = CURVA_RUAN
+def tom_ruan(lg, visual=VISUAL):
+    """Valor de tela (0-1, gama 2.4) para log2 da luminância de cena; acima do último ponto, um ombro
+    que segue a inclinação medida até o branco."""
+    xs = VISUAIS[visual]["curva"]
     if lg <= xs[0][0]:
         return 0.0
     if lg >= xs[-1][0]:
@@ -191,22 +206,28 @@ def conversao(curva, gama, exposicao=0.0, ganhos=(1.0, 1.0, 1.0), lut=None):
     return f
 
 
-def conversao_neutra(curva, gama, exposicao=0.0, ganhos=(1.0, 1.0, 1.0)):
+def conversao_neutra(curva, gama, exposicao=0.0, ganhos=(1.0, 1.0, 1.0), visual=VISUAL):
     """Sinal -> Rec.709 sem LUT: luz de cena, exposição, matriz pra Rec.709, branco (ganhos em
-    Rec.709 linear), a curva de tom do Ruan na luminância (a cor segue como razão) e a saturação dele."""
+    Rec.709 linear), o calor do visual, a curva de tom do Ruan na luminância (a cor segue como razão)
+    e a saturação dele."""
     dec, _ = CURVAS[curva]
     mt = matriz(gama, "rec709")
     k = 2.0 ** exposicao
+    vis = VISUAIS[visual]
+    c = vis["calor"]
+    norma = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    g = [ganhos[i] * c[i] / norma for i in range(3)]
+    sat = vis["saturacao"]
     def f(s):
         lin = [dec(s[q]) * k for q in range(3)]
-        v = [max(sum(mt[i][j] * lin[j] for j in range(3)) * ganhos[i], 0.0) for i in range(3)]
+        v = [max(sum(mt[i][j] * lin[j] for j in range(3)) * g[i], 0.0) for i in range(3)]
         lum = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]
         if lum <= 1e-7:
             return (0.0, 0.0, 0.0)
-        tela = tom_ruan(math.log2(lum)) ** 2.4
+        tela = tom_ruan(math.log2(lum), visual) ** 2.4
         out = [x * tela / lum for x in v]
         l2 = 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2]
-        out = [l2 + (x - l2) * SATURACAO_RUAN for x in out]
+        out = [l2 + (x - l2) * sat for x in out]
         return tuple(min(max(x, 0.0), 1.0) ** (1 / 2.4) for x in out)
     return f
 
@@ -322,10 +343,13 @@ def branco_auto(quadros, curva, gama):
     return (round(statistics.median(e[0] for e in estimativas), 4), 1.0, round(statistics.median(e[1] for e in estimativas), 4))
 
 
-def exposicao_pela_pele(curva, gama, pele, lut=None, alvo=PELE_ALVO, modo="sony", ganhos=(1, 1, 1)):
-    """Pontos de luz (em luz de cena) que levam a pele medida ao alvo depois da conversão."""
+def exposicao_pela_pele(curva, gama, pele, lut=None, alvo=None, modo="sony", ganhos=(1, 1, 1), visual=VISUAL):
+    """Pontos de luz (em luz de cena) que levam a pele medida ao alvo depois da conversão (padrão: a
+    pele do visual no modo neutro, PELE_ALVO no sony)."""
     luma = lambda c: 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
-    conv = (lambda ev: conversao_neutra(curva, gama, ev, ganhos)) if modo == "neutro" else (lambda ev: conversao(curva, gama, ev, ganhos, lut))
+    if alvo is None:
+        alvo = VISUAIS[visual]["pele"] if modo == "neutro" else PELE_ALVO
+    conv = (lambda ev: conversao_neutra(curva, gama, ev, ganhos, visual)) if modo == "neutro" else (lambda ev: conversao(curva, gama, ev, ganhos, lut))
     lo, hi = -8.0, 4.0
     for _ in range(30):
         mid = (lo + hi) / 2
@@ -378,6 +402,7 @@ def main():
     a.add_argument("--amostras", metavar="PASTA", help="com --auto: os quatro sabores da Sony lado a lado, pra escolher")
     a.add_argument("--sabor", help="modo sony: LC-709 (padrão), LC-709TypeA, Cine+709 ou SLog2-709")
     a.add_argument("--modo", choices=("neutro", "sony"), default="neutro")
+    a.add_argument("--visual", choices=VISUAIS, default=VISUAL, help="modo neutro: qual tratamento do Ruan (naruto, o padrão; discord)")
     a.add_argument("--curva", choices=CURVAS)
     a.add_argument("--gama", choices=PRIMARIAS)
     a.add_argument("--exposicao", type=float, default=0.0, help="pontos de luz, em luz de cena")
@@ -406,13 +431,14 @@ def main():
                 o.ganhos = ",".join(map(str, branco_auto(r[2], o.curva, o.gama)))
             g = tuple(float(x) for x in o.ganhos.split(","))
             medida = {"pele_sinal": [round(v, 4) for v in r[0]], "quadros_com_rosto": r[1], "ganhos_branco": g}
-            o.exposicao = exposicao_pela_pele(o.curva, o.gama, r[0], o.lut, modo=o.modo, ganhos=g)
+            o.exposicao = exposicao_pela_pele(o.curva, o.gama, r[0], o.lut, modo=o.modo, ganhos=g, visual=o.visual)
     if not (o.saida and o.curva and o.gama):
         a.error("SAIDA, --curva e --gama")
     ganhos = tuple(float(x) for x in o.ganhos.split(","))
-    f = conversao_neutra(o.curva, o.gama, o.exposicao, ganhos) if o.modo == "neutro" else conversao(o.curva, o.gama, o.exposicao, ganhos, o.lut)
-    escrever_cube(o.saida, f, o.n, f"{o.modo} {o.curva}/{o.gama} exp {o.exposicao:+.2f}")
-    print(json.dumps({"saida": o.saida, "modo": o.modo, "curva": o.curva, "gama": o.gama, "exposicao": o.exposicao, "medida": medida}))
+    f = conversao_neutra(o.curva, o.gama, o.exposicao, ganhos, o.visual) if o.modo == "neutro" else conversao(o.curva, o.gama, o.exposicao, ganhos, o.lut)
+    nome = f"neutro {o.visual}" if o.modo == "neutro" else o.modo
+    escrever_cube(o.saida, f, o.n, f"{nome} {o.curva}/{o.gama} exp {o.exposicao:+.2f}")
+    print(json.dumps({"saida": o.saida, "modo": o.modo, "visual": o.visual if o.modo == "neutro" else None, "curva": o.curva, "gama": o.gama, "exposicao": o.exposicao, "medida": medida}))
 
 
 if __name__ == "__main__":
