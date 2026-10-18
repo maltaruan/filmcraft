@@ -14,10 +14,13 @@ def tempo(s):
 def frases_do_corte(fcpxml):
     """[(inicio, fim, texto)] no tempo do corte, e os trechos [(inicio_corte, inicio_fonte, duracao)]."""
     raiz = ET.parse(fcpxml).getroot()
+    # o start do <asset> é o timecode da câmera (Sony 02:46:24:00, iPhone 01:00:00:00); a transcrição
+    # conta do começo do arquivo, então o início na fonte dos trechos desconta ele
+    tc = {a.get("id"): tempo(a.get("start")) for a in raiz.iter("asset")}
     trechos, frases = [], []
     for clipe in raiz.iter("asset-clip"):
         off, ini, dur = tempo(clipe.get("offset")), tempo(clipe.get("start")), tempo(clipe.get("duration"))
-        trechos.append((off, ini, dur))
+        trechos.append((off, ini - tc.get(clipe.get("ref"), 0), dur))
         for t in clipe.findall("title"):
             texto = "".join(t.find("text").itertext()).strip() if t.find("text") is not None else ""
             if texto:

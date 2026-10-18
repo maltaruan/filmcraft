@@ -222,7 +222,7 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True):
         m.run("effects.setKeyframe", {"clip": cid, "effect": efeito, "param": param, "mediaTime": t, "value": v})
         m.run("effects.setInterpolation", {"clip": cid, "effect": efeito, "param": param, "mediaTime": int(t), "interpolation": interp})
 
-    com_transform, com_blur, com_metade = {}, set(), set()
+    com_transform, com_blur, metade = {}, set(), {}  # metade: clipe -> [[a, b, base]] no tempo de mídia
 
     def transform_no_rosto(c, base):
         """Transform centrado no rosto (âncora e posição no mesmo ponto: não move nada sozinho)."""
@@ -294,20 +294,28 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True):
         else:
             trilhas_motion.append([f"V{len(m.run('sequence.inspect')['video'])}", t1])
         if modo == "metade":
-            # montagem, não motion: o rosto (âncora do Transform) desce pra 3/4 da altura e a metade de
-            # cima do vídeo é cortada; a cena ocupa a metade de cima. Só durante a cena: quadros-chave hold.
             for c, a, b, base in pedacos(t0, t1):
-                cid = c["clip"]
-                ponto = transform_no_rosto(c, base)
-                if cid not in com_metade:
-                    kf(cid, "transform", "position", base, ponto, "hold")
-                    m.run("effects.apply", {"clips": [cid], "effect": "Crop"})
-                    kf(cid, "crop", "top", base, 0.0, "hold")
-                    com_metade.add(cid)
-                kf(cid, "transform", "position", a, [ponto[0], 0.75 * fh], "hold")
-                kf(cid, "transform", "position", b + um_quadro, ponto, "hold")
-                kf(cid, "crop", "top", a, 50.0, "hold")
-                kf(cid, "crop", "top", b + um_quadro, 0.0, "hold")
+                metade.setdefault(c["clip"], []).append([a, b, base])
+    # montagem, não motion: o rosto (âncora do Transform) desce pra 3/4 da altura e a metade de cima do
+    # vídeo é cortada; a cena ocupa a metade de cima. Só durante a cena: quadros-chave hold. Cenas metade
+    # encostadas no mesmo clipe viram uma faixa só: o rosto devolvido no fim de uma (b + um quadro)
+    # cairia depois do quadro que o desce na seguinte e ganharia.
+    for cid, faixas in metade.items():
+        juntas = []
+        for a, b, base in sorted(faixas):
+            if juntas and a <= juntas[-1][1] + um_quadro:
+                juntas[-1][1] = max(juntas[-1][1], b)
+            else:
+                juntas.append([a, b, base])
+        ponto = transform_no_rosto(por_id[cid], juntas[0][2])
+        kf(cid, "transform", "position", juntas[0][2], ponto, "hold")
+        m.run("effects.apply", {"clips": [cid], "effect": "Crop"})
+        kf(cid, "crop", "top", juntas[0][2], 0.0, "hold")
+        for a, b, _ in juntas:
+            kf(cid, "transform", "position", a, [ponto[0], 0.75 * fh], "hold")
+            kf(cid, "transform", "position", b + um_quadro, ponto, "hold")
+            kf(cid, "crop", "top", a, 50.0, "hold")
+            kf(cid, "crop", "top", b + um_quadro, 0.0, "hold")
     print(f"efeitos: {len(plano.get('zoom', []))} zoom, {len(plano.get('desfoque', []))} desfoque, "
           f"{len(plano.get('broll', []))} B-roll, {len(cenas)} motion em {len(trilhas_motion)} trilha(s)", file=sys.stderr)
 
