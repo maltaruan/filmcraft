@@ -4,7 +4,7 @@ Uso:
     python3 -I montar_video.py PASTA_DO_CORTE SAIDA_SEM_EXTENSAO
         [--formato 9x16|16x9|4x3]
         [--cor] [--sem-legenda | --legenda-viva LEGENDA.mov] [--legenda-tamanho 72]
-        [--musica TRILHA --musica-db -18] [--sem-voz] [--lufs -14] [--sabor LC-709TypeA] [--sem-log] [--sem-celular] [--cli CAMINHO_DO_filmcraft-cli]
+        [--musica TRILHA --musica-db -18 --musica-abaixa -4.5] [--sem-voz] [--lufs -14] [--sabor LC-709TypeA] [--sem-log] [--sem-celular] [--cli CAMINHO_DO_filmcraft-cli]
 
 PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legenda.srt`).
 
@@ -329,6 +329,8 @@ def main():
     a.add_argument("--sem-legenda", action="store_true")
     a.add_argument("--legenda-viva", metavar="LEGENDA.mov", help="a legenda animada pronta (HyperFrames, ~/motion-ysquad/receitas/legenda_viva.py)")
     a.add_argument("--musica")
+    a.add_argument("--musica-abaixa", type=float, default=-4.5,
+                   help="quanto a música desce sob a fala (dB); -4,5 põe a trilha ~15 dB abaixo da voz, medido num reel de referência do Ruan (o -12 antigo deixava ~22, baixa demais)")
     a.add_argument("--musica-db", type=float, default=-18.0, help="nível da música sem fala")
     a.add_argument("--sem-voz", action="store_true")
     a.add_argument("--sabor", help="converter o log pela LUT oficial da Sony (LC-709, LC-709TypeA...) em vez do modo neutro")
@@ -407,7 +409,7 @@ def main():
         mus = m.run("timeline.place", {"item": item, "audioTrack": "new", "time": 0, "duration": dur, "video": False})["clips"]
         m.run("essentialSound.setType", {"clips": mus, "type": "music"})
         m.run("essentialSound.set", {"clips": mus, "values": {"volume.on": True, "volume.level_db": o.musica_db, "ducking.enabled": True,
-                                                              "ducking.reduce_db": -12.0, "ducking.fade_s": 0.4}})
+                                                              "ducking.reduce_db": o.musica_abaixa, "ducking.fade_s": 0.4}})
         duck = m.run("essentialSound.generateDucking", {"clips": mus})
         print(f"música: ducking {json.dumps(duck)[:200]}", file=sys.stderr)
 
