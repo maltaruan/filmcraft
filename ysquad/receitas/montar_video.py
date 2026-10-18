@@ -30,7 +30,9 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
     {"zoom": [{"de": 16, "ate": 18, "escala": 115, "entrada": "seco|suave"}],
      "desfoque": [{"de": 56, "ate": 58, "forca": 40, "sentido": "abre|fecha"}],
      "broll": [{"de": 61, "ate": 64, "arquivo": "/caminho/trecho.mp4", "inicio": 0.0, "zoom": 108}],
-     "motion": [{"de": 12, "ate": 18, "arquivo": "/caminho/cena.mov", "antes": 0.1, "saida": 0.4, "modo": "metade"}]}
+     "motion": [{"de": 12, "ate": 18, "arquivo": "/caminho/cena.mov", "antes": 0.1, "saida": 0.4, "modo": "metade"}],
+     "sobrepor": [{"de": 30, "ate": 31, "arquivo": "/caminho/filmburn.mp4", "inicio": 0.0, "antes": 0.1, "opacidade": 100}],
+     "som": [{"em": 12, "arquivo": "/caminho/whoosh.wav", "db": -8, "antes": 0.15}]}
   zoom = efeito Transform centrado no rosto, por cima do enquadramento: "seco" corta pra escala
   na primeira palavra e volta no fim da última; "suave" aproxima devagar até o fim e corta de volta.
   desfoque = Gaussian Blur: "abre" vai da força a zero (foco que chega), "fecha" de zero à força.
@@ -44,7 +46,13 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
   palavra (0 a 0,1) até `saida` segundos depois da última. Cenas em sequência numa trilha; uma que
   se sobrepõe abre outra. "modo": "metade" (só no 9x16) é montagem: durante a cena o rosto desce pra
   metade de baixo (Transform e Crop no vídeo, quadros-chave hold) e a cena ocupa a de cima.
-  Camadas, de baixo pra cima: vídeo, B-roll, motion, legenda viva.
+  sobrepor = film burn, overlay ou transição do acervo de FX do Ruan (`~/motion-ysquad/acervo-fx/acervo.json`):
+  fundo preto, sem transparência, entra em modo de mistura Tela (o preto some, a luz fica), preenchendo o
+  quadro, sem som, de `antes` segundos antes da palavra `de`; sem `ate` dura o próprio arquivo (a partir de
+  `inicio`), com `ate` vai até o fim da palavra. Uma trilha, abre outra se encostar.
+  som = som de efeito do acervo, com o tempo do próprio arquivo, começando `antes` segundos antes da
+  palavra `em` (whoosh chega antes do corte), `db` de ganho (padrão -8), em trilhas de áudio próprias.
+  Camadas, de baixo pra cima: vídeo, B-roll, motion, sobrepor, legenda viva.
 - Voz (padrão, --sem-voz desliga): Essential Sound de diálogo com limpeza leve (ruído, sala,
   graves de manuseio, compressor, EQ "Balanced Voice"). --musica entra na A2 como música, abaixando
   sozinha sob a fala (ducking). A exportação normaliza o volume pra --lufs (-14, Instagram e YouTube).
@@ -99,6 +107,12 @@ def video_do_fcpxml(path):
     if not m:
         sys.exit(f"nenhum vídeo referenciado em {path}")
     return urllib.parse.unquote(m.group(1))
+
+
+def duracao_media(caminho):
+    """Duração do arquivo em segundos (ffprobe)."""
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", caminho], capture_output=True, text=True)
+    return float(r.stdout.strip())
 
 
 def trechos_da_fonte(clipes):
@@ -316,8 +330,47 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True):
             kf(cid, "transform", "position", b + um_quadro, ponto, "hold")
             kf(cid, "crop", "top", a, 50.0, "hold")
             kf(cid, "crop", "top", b + um_quadro, 0.0, "hold")
+    trilhas_sob = []  # [nome, fim do último]
+    for e in plano.get("sobrepor", []):
+        if e["de"] not in pal or ("ate" in e and e["ate"] not in pal):
+            sys.exit(f"sobrepor {e}: palavra fora do corte")
+        if not os.path.exists(e["arquivo"]):
+            sys.exit(f"sobrepor {e}: arquivo não existe")
+        t0 = max(float(pal[e["de"]][0]) - float(e.get("antes", 0.0)), 0.0)
+        ini = float(e.get("inicio", 0.0))
+        dur = (float(pal[e["ate"]][1]) - t0) if "ate" in e else duracao_media(e["arquivo"]) - ini
+        livre = next((tr for tr in trilhas_sob if tr[1] <= t0 + 1e-6), None)
+        item = m.run("file.import", {"paths": [os.path.abspath(e["arquivo"])]})["items"][0]
+        sc = m.run("timeline.place", {"item": item, "track": livre[0] if livre else "new", "time": round(t0 * TPS),
+                                      "sourceIn": round(ini * TPS), "duration": round(dur * TPS), "audio": False})["clips"][0]
+        if livre:
+            livre[1] = t0 + dur
+        else:
+            trilhas_sob.append([f"V{len(m.run('sequence.inspect')['video'])}", t0 + dur])
+        m.run("clip.fillFrame", {"clips": [sc]})
+        m.run("effects.setParam", {"clip": sc, "effect": "opacity", "param": "blend", "value": "Screen"})
+        if float(e.get("opacidade", 100)) != 100:
+            m.run("effects.setParam", {"clip": sc, "effect": "opacity", "param": "opacity", "value": float(e["opacidade"])})
+    trilhas_som = []  # [nome, fim do último]
+    for e in sorted(plano.get("som", []), key=lambda e: e["em"]):
+        if e["em"] not in pal:
+            sys.exit(f"som {e}: palavra fora do corte")
+        if not os.path.exists(e["arquivo"]):
+            sys.exit(f"som {e}: arquivo não existe")
+        t0 = max(float(pal[e["em"]][0]) - float(e.get("antes", 0.0)), 0.0)
+        t1 = t0 + duracao_media(e["arquivo"])
+        livre = next((tr for tr in trilhas_som if tr[1] <= t0 + 1e-6), None)
+        item = m.run("file.import", {"paths": [os.path.abspath(e["arquivo"])]})["items"][0]
+        sc = m.run("timeline.place", {"item": item, "audioTrack": livre[0] if livre else "new", "time": round(t0 * TPS), "video": False})["clips"]
+        if livre:
+            livre[1] = t1
+        else:
+            trilhas_som.append([f"A{len(m.run('sequence.inspect')['audio'])}", t1])
+        m.run("essentialSound.setType", {"clips": sc, "type": "sfx"})
+        m.run("essentialSound.set", {"clips": sc, "values": {"volume.on": True, "volume.level_db": float(e.get("db", -8.0))}})
     print(f"efeitos: {len(plano.get('zoom', []))} zoom, {len(plano.get('desfoque', []))} desfoque, "
-          f"{len(plano.get('broll', []))} B-roll, {len(cenas)} motion em {len(trilhas_motion)} trilha(s)", file=sys.stderr)
+          f"{len(plano.get('broll', []))} B-roll, {len(cenas)} motion em {len(trilhas_motion)} trilha(s), "
+          f"{len(plano.get('sobrepor', []))} sobreposição(ões), {len(plano.get('som', []))} som(ns)", file=sys.stderr)
 
 
 def main():
