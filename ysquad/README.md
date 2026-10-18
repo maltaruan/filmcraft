@@ -57,7 +57,7 @@ nesta camada, sem tocar no produto: `cor/hlg_709.py` refaz o jeito da Apple (tel
 gama 0,846) e a receita aplica sozinha no vídeo principal e no B-roll. Medido no vídeo da câmera
 frontal (`ec1beaea….MOV`): 0,67 nível do macOS no quadro, 2,1 no MP4 final (`target/fixtures/corte_celular`).
 
-Pendente: legenda viva lenta (~29 s pra 31 s de fala), agora no `~/motion-ysquad`.
+Legenda viva: ~26 s pra 52 s de fala desde 18/10 (quadros no HyperFrames, ProRes pelo chip de vídeo), no `~/motion-ysquad`.
 Motion, B-roll real (incluindo B-roll de celular) e música testados só com material sintético.
 
 Riscos: a escala de entrada das LUTs da Sony (código cheio x faixa de vídeo) não foi confirmada com
