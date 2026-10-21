@@ -30,7 +30,7 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
     {"zoom": [{"de": 16, "ate": 18, "escala": 115, "entrada": "seco|suave"}],
      "desfoque": [{"de": 56, "ate": 58, "forca": 40, "sentido": "abre|fecha"}],
      "broll": [{"de": 61, "ate": 64, "arquivo": "/caminho/trecho.mp4", "inicio": 0.0, "zoom": 108}],
-     "motion": [{"de": 12, "ate": 18, "arquivo": "/caminho/cena.mov", "antes": 0.1, "saida": 0.4, "modo": "metade"}],
+     "motion": [{"de": 12, "ate": 18, "arquivo": "/caminho/cena.mov", "antes": 0.1, "saida": 0.4, "modo": "metade", "inicio": 0.0}],
      "sobrepor": [{"de": 30, "ate": 31, "arquivo": "/caminho/filmburn.mp4", "inicio": 0.0, "antes": 0.1, "opacidade": 100}],
      "som": [{"em": 12, "arquivo": "/caminho/whoosh.wav", "db": -8, "antes": 0.15}]}
   zoom = efeito Transform centrado no rosto, por cima do enquadramento: "seco" corta pra escala
@@ -43,7 +43,8 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
   ProRes 4444 com transparência, já no tamanho do vídeo final e no lugar. A receita não cria nem
   posiciona motion: só confere arquivo, transparência e tamanho (diferente do vídeo: para, sem
   encaixar nem redimensionar) e põe a cena a 100 %, sem som, de `antes` segundos antes da primeira
-  palavra (0 a 0,1) até `saida` segundos depois da última. Cenas em sequência numa trilha; uma que
+  palavra (0 a 0,1) até `saida` segundos depois da última; `inicio` atrasa a entrada e pula os
+  mesmos segundos do arquivo (a cena entra mais tarde e continua em sincronia; o rosto fica até lá). Cenas em sequência numa trilha; uma que
   se sobrepõe abre outra. "modo": "metade" (só no 9x16) é montagem: durante a cena o rosto desce pra
   metade de baixo (Transform e Crop no vídeo, quadros-chave hold) e a cena ocupa a de cima.
   sobrepor = film burn, overlay ou transição do acervo de FX do Ruan (`~/motion-ysquad/acervo-fx/acervo.json`):
@@ -212,7 +213,10 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True):
             sys.exit(f"motion {e}: o único modo é metade (a cena não se mexe; metade mexe no vídeo do rosto)")
         if modo == "metade" and quadro[1] <= quadro[0]:
             sys.exit(f"motion {e}: o modo metade é do 9x16")
-        cenas.append((max(t0 - antes, 0.0), t1 + saida, modo, cena_pronta(e, quadro)))
+        inicio = float(e.get("inicio", 0.0))
+        if inicio < 0 or max(t0 - antes, 0.0) + inicio >= t1 + saida:
+            sys.exit(f"motion {e}: inicio fora da cena")
+        cenas.append((max(t0 - antes, 0.0) + inicio, t1 + saida, modo, cena_pronta(e, quadro), inicio))
 
     def pedacos(t0, t1):
         """(clipe, mídia em t0, mídia em t1) de cada clipe que a faixa toca."""
@@ -297,12 +301,12 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True):
             kf(bc, "transform", "scale_height", c["sourceIn"], 100.0, "linear")
             kf(bc, "transform", "scale_height", c["sourceOut"], float(r["zoom"]), "hold")
     trilhas_motion = []  # [nome, fim da última cena]
-    for t0, t1, modo, arquivo in sorted(cenas, key=lambda x: (x[0], x[1])):
+    for t0, t1, modo, arquivo, inicio in sorted(cenas, key=lambda x: (x[0], x[1])):
         # a cena chega pronta: a 100 %, no centro do quadro, sem encaixe nem posição
         livre = next((tr for tr in trilhas_motion if tr[1] <= t0 + 1e-6), None)
         item = m.run("file.import", {"paths": [arquivo]})["items"][0]
         m.run("timeline.place", {"item": item, "track": livre[0] if livre else "new", "time": round(t0 * TPS),
-                                 "duration": round((t1 - t0) * TPS), "audio": False})
+                                 "sourceIn": round(inicio * TPS), "duration": round((t1 - t0) * TPS), "audio": False})
         if livre:
             livre[1] = t1
         else:
@@ -312,8 +316,8 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True):
                 metade.setdefault(c["clip"], []).append([a, b, base])
     # montagem, não motion: o rosto (âncora do Transform) desce pra 3/4 da altura e a metade de cima do
     # vídeo é cortada; a cena ocupa a metade de cima. Só durante a cena: quadros-chave hold. Cenas metade
-    # encostadas no mesmo clipe viram uma faixa só: o rosto devolvido no fim de uma (b + um quadro)
-    # cairia depois do quadro que o desce na seguinte e ganharia.
+    # encostadas no mesmo clipe viram uma faixa só: o rosto devolvido no fim de uma (em b, o 1º quadro
+    # depois dela) cairia no quadro que o desce na seguinte. Devolver em b + 1 deixava um quadro preto.
     for cid, faixas in metade.items():
         juntas = []
         for a, b, base in sorted(faixas):
@@ -327,9 +331,9 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True):
         kf(cid, "crop", "top", juntas[0][2], 0.0, "hold")
         for a, b, _ in juntas:
             kf(cid, "transform", "position", a, [ponto[0], 0.75 * fh], "hold")
-            kf(cid, "transform", "position", b + um_quadro, ponto, "hold")
+            kf(cid, "transform", "position", b, ponto, "hold")
             kf(cid, "crop", "top", a, 50.0, "hold")
-            kf(cid, "crop", "top", b + um_quadro, 0.0, "hold")
+            kf(cid, "crop", "top", b, 0.0, "hold")
     trilhas_sob = []  # [nome, fim do último]
     for e in plano.get("sobrepor", []):
         if e["de"] not in pal or ("ate" in e and e["ate"] not in pal):
