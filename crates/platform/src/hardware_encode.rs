@@ -15,7 +15,7 @@
 
 use std::sync::{Once, OnceLock};
 
-use filmcraft_export::{BitrateMode, EncodedPacket, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, H264Profile, HardwareEncoding, VideoEncoder};
+use filmcraft_export::{BitrateMode, ColorSignal, EncodedPacket, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, H264Profile, HardwareEncoding, VideoEncoder};
 use filmcraft_isobmff::{AvcConfig, HevcConfig, SampleEntry};
 use filmcraft_time::FrameRate;
 
@@ -140,7 +140,7 @@ pub fn videotoolbox_encoder_factory(
     match VtEncoder::new(config) {
         Ok(vt) => {
             filmcraft_export::note_hw_encode_session();
-            Some(Ok(Box::new(HardwareEncoder { vt, y: Vec::new(), u: Vec::new(), v: Vec::new(), decoded: 0 })))
+            Some(Ok(Box::new(HardwareEncoder { vt, y: Vec::new(), u: Vec::new(), v: Vec::new(), decoded: 0, signal: s.signal })))
         }
         Err(why) => {
             log::info!("hardware {name} encoding declined: {why}");
@@ -168,6 +168,8 @@ pub struct HardwareEncoder {
     v: Vec<u8>,
     /// Compressed frames returned so far.
     decoded: i64,
+    /// The export's colour, written as `colr` like the software encoders do.
+    signal: ColorSignal,
 }
 
 impl HardwareEncoder {
@@ -198,14 +200,17 @@ impl VideoEncoder for HardwareEncoder {
     fn sample_entry(&self) -> SampleEntry {
         let c = self.vt.config();
         let (w, h) = (c.width.min(u32::from(u16::MAX)) as u16, c.height.min(u32::from(u16::MAX)) as u16);
-        match (c.profile.codec(), self.vt.parameter_sets()) {
+        let mut e = match (c.profile.codec(), self.vt.parameter_sets()) {
             (VtCodec::H264, p) => {
                 let (sps, pps) = p.map(|p| (p.sps, p.pps)).unwrap_or_default();
                 SampleEntry::avc(AvcConfig::new(sps, pps, 4), w, h)
             }
             // `encode` refuses to go on without a usable record, so a stream that got this far has one
             (VtCodec::Hevc, p) => SampleEntry::hevc(p.as_ref().and_then(|p| hevc_config(p).ok()).unwrap_or_default(), w, h),
-        }
+        };
+        // `colr` for SDR too, as the software H.264 encoder writes it (#2142): Apple's players read it
+        self.signal.apply_to(&mut e, false);
+        e
     }
 
     fn timescale(&self) -> u32 {

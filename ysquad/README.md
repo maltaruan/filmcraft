@@ -31,7 +31,7 @@ produto (`crates/`, gráficos, modelos `.fcgt`) é do upstream e não é mexido 
 - MCP registrado no escopo do usuário: `filmcraft-headless` (sem janela, `--demo`) e `filmcraft`
   (ponte pro app aberto, porta 9876).
 
-## Estado (16/10/2026)
+## Estado (22/10/2026)
 
 Pronto: reel completo por receita; cor do Lumetri inteira na placa (curvas, rodas, HSL, looks e
 LUT de entrada como tabela 3D); CLI com Metal; conversão neutra do log validada a 3,7 níveis do
@@ -58,7 +58,21 @@ gama 0,846) e a receita aplica sozinha no vídeo principal e no B-roll. Medido n
 frontal (`ec1beaea….MOV`): 0,67 nível do macOS no quadro, 2,1 no MP4 final (`target/fixtures/corte_celular`).
 
 Legenda viva: ~26 s pra 52 s de fala desde 18/10 (quadros no HyperFrames, ProRes pelo chip de vídeo), no `~/motion-ysquad`.
-Motion, B-roll real (incluindo B-roll de celular) e música testados só com material sintético.
+
+Efeitos do acervo (18/10): `sobrepor` (film burn, overlay, transição em Screen, enchendo o quadro) e
+`som` (efeito sonoro na palavra, trilhas próprias) no `efeitos.json`. B-roll de celular aprovado nas
+inserções; música ~15 dB abaixo da voz (`--musica-abaixa -4.5`), medida no reel de referência do Ruan.
+
+Primeiro vídeo real (21/10): "Naruto x iteração" editado ponta a ponta, aprovado. Base = o vídeo que o
+Ruan já cortou no DaVinci, nunca o bruto. `inicio` numa cena de motion atrasa a entrada e pula os
+mesmos segundos do arquivo (fica em sincronia); o rosto volta no quadro certo no fim da metade.
+Molde em `~/motion-ysquad/videos/naruto-dvr/README.md`. 122 s de vídeo montados em ~60 s.
+
+Versão oficial 0.10.0 (22/10): juntada sem conflito (marca `antes-oficial-0.10` no estado anterior).
+O Naruto remontado saiu idêntico quadro a quadro e no volume (-14,1 LUFS). Conserto nosso em cima:
+a exportação H.264/HEVC pela placa do Mac (VideoToolbox) não gravava a etiqueta de cor (`colr`) que o
+QuickTime, o Final Cut e o iPhone leem; o conserto oficial (#2142) só cobria o encoder de software.
+Agora grava BT.709 (teste `hardware_sdr_carries_a_colr_box`).
 
 Riscos: a escala de entrada das LUTs da Sony (código cheio x faixa de vídeo) não foi confirmada com
 cartão cinza (afeta ~3% dos tons médios no modo `sony`). Push pelo SSH só via

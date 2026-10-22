@@ -188,6 +188,20 @@ fn round_trip_through_our_software_decoder() {
     eprintln!("hardware H.264: {} bytes for {n} frames, worst luma PSNR {worst:.1} dB", packets.iter().map(|p| p.data.len()).sum::<usize>());
 }
 
+/// #2142 on the hardware path: SDR H.264 and HEVC carry the export's BT.709 `colr` (nclx), as
+/// the software encoder writes it; Apple's players take the colour from there.
+#[test]
+fn hardware_sdr_carries_a_colr_box() {
+    use filmcraft_isobmff::ColorInfo;
+    let want = ColorInfo::Nclx { primaries: 1, transfer: 1, matrix: 1, full_range: false };
+    for s in [hardware_settings(), hevc_settings()] {
+        let Some(mut enc) = hardware(&s, W, H) else { continue };
+        encode_all(&mut enc, 3);
+        let entry = enc.sample_entry();
+        assert_eq!(entry.video.as_ref().and_then(|v| v.color.clone()), Some(want.clone()), "{}", s.format.label());
+    }
+}
+
 /// A project with an animated demo clip as the whole sequence.
 fn project(frames: i64) -> (Arc<Project>, filmcraft_project::ItemId, SourceMap) {
     let mut p = Project::new("hw");
