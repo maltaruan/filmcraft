@@ -482,7 +482,10 @@ def main():
         mus = m.run("timeline.place", {"item": item, "audioTrack": "new", "time": 0, "duration": dur, "video": False})["clips"]
         m.run("essentialSound.setType", {"clips": mus, "type": "music"})
         m.run("essentialSound.set", {"clips": mus, "values": {"volume.on": True, "volume.level_db": o.musica_db, "ducking.enabled": True,
-                                                              "ducking.reduce_db": o.musica_abaixa, "ducking.fade_s": 0.4}})
+                                                              "ducking.reduce_db": o.musica_abaixa, "ducking.fade_s": 0.4,
+                                                              # com --sem-voz a fala fica sem tipo: a música abaixa sob ela
+                                                              # também (o resto que tem som, efeito, já é tipado)
+                                                              "ducking.againstUntyped": True}})
         duck = m.run("essentialSound.generateDucking", {"clips": mus})
         print(f"música: ducking {json.dumps(duck)[:200]}", file=sys.stderr)
 
