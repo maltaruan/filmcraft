@@ -4,7 +4,7 @@ Uso:
     python3 -I montar_video.py PASTA_DO_CORTE SAIDA_SEM_EXTENSAO
         [--formato 9x16|16x9|4x3]
         [--cor] [--sem-legenda | --legenda-viva LEGENDA.mov] [--legenda-tamanho 72]
-        [--musica TRILHA --musica-db -18 --musica-abaixa -4.5] [--sem-voz] [--lufs -14] [--sabor LC-709TypeA] [--sem-log] [--sem-celular] [--cli CAMINHO_DO_filmcraft-cli]
+        (--musica TRILHA [--musica-db -18 --musica-abaixa -4.5] | --sem-musica) [--sem-voz] [--lufs -14] [--sabor LC-709TypeA] [--sem-log] [--sem-celular] [--cli CAMINHO_DO_filmcraft-cli]
 
 PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legenda.srt`).
 
@@ -56,7 +56,9 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
   Camadas, de baixo pra cima: vídeo, B-roll, motion, sobrepor, legenda viva.
 - Voz (padrão, --sem-voz desliga): Essential Sound de diálogo com limpeza leve (ruído, sala,
   graves de manuseio, compressor, EQ "Balanced Voice"). --musica entra na A2 como música, abaixando
-  sozinha sob a fala (ducking). A exportação normaliza o volume pra --lufs (-14, Instagram e YouTube).
+  sozinha sob a fala (ducking); sem --musica a receita para (vídeo do Naruto saiu mudo assim, 21/10):
+  vídeo sem trilha só com --sem-musica, pedido de propósito. A trilha também vem do efeitos.json
+  ("musica": caminho, ou "sem"), escrita pelo plano do Nolan. A exportação normaliza o volume pra --lufs (-14, Instagram e YouTube).
 - Exporta H.264 com o chip de vídeo do Mac (`hardwareEncoding: auto`), compondo na placa de vídeo
   (`gpuRendering: auto`; o que ela não faz cai sozinho no processador).
 """
@@ -386,6 +388,7 @@ def main():
     a.add_argument("--sem-legenda", action="store_true")
     a.add_argument("--legenda-viva", metavar="LEGENDA.mov", help="a legenda animada pronta (HyperFrames, ~/motion-ysquad/receitas/legenda_viva.py)")
     a.add_argument("--musica")
+    a.add_argument("--sem-musica", action="store_true", help="vídeo sem trilha, de propósito; sem isso, --musica é obrigatória")
     a.add_argument("--musica-abaixa", type=float, default=-4.5,
                    help="quanto a música desce sob a fala (dB); -4,5 põe a trilha ~15 dB abaixo da voz, medido num reel de referência do Ruan (o -12 antigo deixava ~22, baixa demais)")
     a.add_argument("--musica-db", type=float, default=-18.0, help="nível da música sem fala")
@@ -397,6 +400,19 @@ def main():
     a.add_argument("--legenda-tamanho", type=float, default=72.0, help="16x9/4x3, px por 1080 linhas")
     a.add_argument("--cli", default=os.path.join(AQUI, "..", "..", "target", "release", "filmcraft-cli"))
     o = a.parse_args()
+    if not o.musica and not o.sem_musica:  # a trilha do plano (plano_efeitos.py escreve "musica" no efeitos.json)
+        try:
+            dita = json.load(open(os.path.join(o.corte, "efeitos.json"), encoding="utf-8")).get("musica")
+        except (OSError, ValueError):
+            dita = None
+        if dita == "sem":
+            o.sem_musica = True
+        elif dita:
+            o.musica = dita if os.path.isabs(dita) else os.path.join(o.corte, dita)
+    if not o.musica and not o.sem_musica:
+        a.error("falta a trilha: --musica TRILHA, \"musica\" no efeitos.json (linha Música: do plano) ou --sem-musica, se o vídeo é sem música de propósito")
+    if o.musica and not os.path.isfile(o.musica):
+        a.error(f"trilha não encontrada: {o.musica}")
     cli = os.path.abspath(o.cli)
     xml = glob.glob(os.path.join(o.corte, "*.fcpxml"))
     if len(xml) != 1:
