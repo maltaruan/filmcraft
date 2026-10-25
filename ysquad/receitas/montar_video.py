@@ -268,12 +268,13 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cor
                 repouso[c["clip"]] = float(zoom_cortes)
     # câmera do plano (Cam Zoom do Rick Miura, ~/Downloads/Cam Zoom 3 Predef.prfpset): quem lê o roteiro
     # escolhe onde, em segundos do corte. Curva bezier e obturador a 360°; o repouso de cada clipe anda junto.
-    #   soco  = "Vai e volta": chega a 138 em cima da palavra (`em`), segura até `ate`, assenta em `depois` (100 <-> 105)
+    #   soco  = "Vai e volta": chega ao `pico` (138 no preset; plano pode trocar) em cima da palavra (`em`), segura até `ate`, assenta em `depois` (100 <-> 105)
     #           ("solta": false segura até a emenda)
     #   passo = aproxima até `escala` em `dur` (0,534 s, o "Vai") e fica: enumeração, crescendo, fim
-    #   emendas = números das emendas (J1 = 1ª) com "Vai" no fim do trecho (-> 138) e "Volta" no seguinte (138 -> 100)
+    #   emendas = números das emendas (J1 = 1ª) com "Vai" no fim do trecho (-> pico) e "Volta" no seguinte (pico -> 100)
     zooms = []  # [segundos na linha do tempo, o que acontece]: vira marcador e zooms.json (motion não cai em cima)
     camera, emendas = plano.get("camera", []), set(plano.get("emendas", []))
+    pico = float(plano.get("pico", 138.0))
     if camera or emendas:
         eventos = sorted([(float(e["em"]) - (0.3 if e["tipo"] == "soco" else 0.2), e) for e in camera], key=lambda x: x[0])
         for k, c in enumerate(clipes):
@@ -285,10 +286,10 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cor
             m.run("effects.setParam", {"clip": cid, "effect": "transform", "param": "shutter_override", "value": True})
             m.run("effects.setParam", {"clip": cid, "effect": "transform", "param": "shutter_angle", "value": 360.0})
             nivel, livre = 100.0, t_ini
-            if k in emendas:  # Volta: o trecho chega em 138, onde o anterior parou, e abre até 100
-                kf(cid, "transform", "scale_height", ini, 138.0, "bezier")
+            if k in emendas:  # Volta: o trecho chega no pico, onde o anterior parou, e abre até 100
+                kf(cid, "transform", "scale_height", ini, pico, "bezier")
                 kf(cid, "transform", "scale_height", midia(t_ini + 1.084), 100.0, "hold")
-                zooms.append([round(t_ini, 3), f"J{k}: volta 138 -> 100"])
+                zooms.append([round(t_ini, 3), f"J{k}: volta {pico:g} -> 100"])
                 livre = t_ini + 1.084
             for t0, e in eventos:
                 if not t_ini <= float(e["em"]) < t_fim:
@@ -298,12 +299,12 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cor
                 if e["tipo"] == "soco":
                     ate = max(float(e.get("ate", e["em"])), t0 + 1.376)
                     novo = float(e.get("depois", 105.0 if nivel == 100.0 else 100.0))
-                    passos = [(t0, nivel, "bezier"), (t0 + 0.5, 138.0, "bezier"), (ate, 138.0, "bezier" if e.get("solta", True) else "hold")]
+                    passos = [(t0, nivel, "bezier"), (t0 + 0.5, pico, "bezier"), (ate, pico, "bezier" if e.get("solta", True) else "hold")]
                     if e.get("solta", True):
                         passos.append((ate + 0.626, novo, "hold"))
                     else:
-                        novo = 138.0
-                    descricao = f"soco {nivel:g} -> 138 -> {novo:g} em \"{e.get('fala', '')}\""
+                        novo = pico
+                    descricao = f"soco {nivel:g} -> {pico:g} -> {novo:g} em \"{e.get('fala', '')}\""
                 elif e["tipo"] == "passo":
                     novo = float(e["escala"])
                     passos = [(t0, nivel, "bezier"), (t0 + float(e.get("dur", 0.534)), novo, "hold")]
@@ -318,10 +319,12 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cor
                 nivel, livre = novo, passos[-1][0]
             if k + 1 in emendas:  # Vai: aproxima até a emenda
                 kf(cid, "transform", "scale_height", fim - round(0.534 * TPS), nivel, "bezier")
-                kf(cid, "transform", "scale_height", fim, 138.0, "hold")
-                zooms.append([round(t_fim - 0.534, 3), f"J{k + 1}: vai {nivel:g} -> 138 até o corte"])
+                kf(cid, "transform", "scale_height", fim, pico, "hold")
+                zooms.append([round(t_fim - 0.534, 3), f"J{k + 1}: vai {nivel:g} -> {pico:g} até o corte"])
         zooms.sort()
-        marcas = [0.0] + [t for t, z in zooms if " vai " not in z] + [(clipes[-1]["start"] + clipes[-1]["sourceOut"] - clipes[-1]["sourceIn"]) / TPS]
+        # corte seco também é mudança de quadro
+        marcas = sorted([0.0] + [t for t, z in zooms if " vai " not in z] + [c["start"] / TPS for c in clipes[1:]]
+                        + [(clipes[-1]["start"] + clipes[-1]["sourceOut"] - clipes[-1]["sourceIn"]) / TPS])
         longos = [f"{a:.1f}-{b:.1f}" for a, b in zip(marcas, marcas[1:]) if b - a > 7.5]
         print(f"câmera: {len(zooms)} movimentos" + (f" · mais de 7,5 s parado em {', '.join(longos)}" if longos else ""), file=sys.stderr)
     for z in plano.get("zoom", []):
