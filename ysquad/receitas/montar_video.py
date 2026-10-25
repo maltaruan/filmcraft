@@ -213,7 +213,9 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cor
     # as cenas de motion são conferidas antes de mexer em qualquer coisa
     cenas = []
     for e in plano.get("motion", []):
-        t0, t1 = faixa(e)
+        # t0/t1 (segundos do corte) mandam quando existem: o índice da transcrição do bruto derrapa
+        # em bruto longo (C0205, 25/10: degraus de 1 s depois de ~8 min); quem escreve tira da retranscrição do corte
+        t0, t1 = (float(e["t0"]), float(e["t1"])) if "t0" in e else faixa(e)
         antes, saida, modo = float(e.get("antes", 0.0)), float(e.get("saida", 0.0)), e.get("modo")
         if not 0.0 <= antes <= 0.1:
             sys.exit(f"motion {e}: antes vai de 0 a 0,1 s")
@@ -476,6 +478,7 @@ def main():
     a.add_argument("--zoom-cortes", type=float, default=0.0, metavar="ESCALA", help="trecho sim, trecho não nessa escala (ex.: 108), centrado no rosto")
     a.add_argument("--microfade", type=int, default=0, metavar="QUADROS", help="fade de áudio de N quadros na entrada e na saída de cada trecho (ex.: 1)")
     a.add_argument("--igualar-voz", action="store_true", help="cada trecho de fala no mesmo volume (essentialSound.autoMatch)")
+    a.add_argument("--trecho", type=float, nargs=2, metavar=("INI", "FIM"), help="exporta só esse intervalo da linha do tempo (segundos): trecho de aprovação")
     a.add_argument("--revisao", action="store_true", help="marcador em cada emenda e projeto .fcproj salvo ao lado do MP4 (revisão da decupagem no app)")
     a.add_argument("--cli", default=os.path.join(AQUI, "..", "..", "target", "release", "filmcraft-cli"))
     o = a.parse_args()
@@ -609,7 +612,8 @@ def main():
     t = time.time()
     r = m.run("file.exportMedia", {"path": os.path.abspath(o.saida) + ".mp4", "format": "h264", "hardwareEncoding": "auto", "gpuRendering": "auto",
                                   "width": w, "height": h, "burnCaptions": not o.sem_legenda and not viva,
-                                  "loudnessLufs": o.lufs, "wait": True})
+                                  "loudnessLufs": o.lufs, "wait": True,
+                                  **({"range": "custom", "startSeconds": o.trecho[0], "endSeconds": o.trecho[1]} if o.trecho else {})})
     m.fechar()
     print(f"exportado em {time.time() - t:.1f} s: {json.dumps(r.get('result', r))}")
 
