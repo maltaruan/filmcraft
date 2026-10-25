@@ -186,6 +186,13 @@ def cena_pronta(e, quadro):
     return os.path.abspath(arq)
 
 
+def parados(zooms, cortes, fim, limite=7.5):
+    """Faixas [a, b] do vídeo com mais de `limite` segundos sem mudança de quadro. Conta como mudança
+    cada movimento de câmera (o "vai" da emenda não: a mudança é o corte), cada corte (o seco também) e o fim."""
+    marcas = sorted([0.0] + [t for t, z in zooms if " vai " not in z] + list(cortes) + [fim])
+    return [(a, b) for a, b in zip(marcas, marcas[1:]) if b - a > limite]
+
+
 def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cortes=0.0):
     """Aplica o efeitos.json do corte nos clipes da V1. Tempo do corte -> tempo da mídia de cada clipe.
     zoom_cortes: trecho sim, trecho não nessa escala (centrado no rosto), pra o corte seco virar ritmo."""
@@ -322,10 +329,8 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cor
                 kf(cid, "transform", "scale_height", fim, pico, "hold")
                 zooms.append([round(t_fim - 0.534, 3), f"J{k + 1}: vai {nivel:g} -> {pico:g} até o corte"])
         zooms.sort()
-        # corte seco também é mudança de quadro
-        marcas = sorted([0.0] + [t for t, z in zooms if " vai " not in z] + [c["start"] / TPS for c in clipes[1:]]
-                        + [(clipes[-1]["start"] + clipes[-1]["sourceOut"] - clipes[-1]["sourceIn"]) / TPS])
-        longos = [f"{a:.1f}-{b:.1f}" for a, b in zip(marcas, marcas[1:]) if b - a > 7.5]
+        fim_seq = (clipes[-1]["start"] + clipes[-1]["sourceOut"] - clipes[-1]["sourceIn"]) / TPS
+        longos = [f"{a:.1f}-{b:.1f}" for a, b in parados(zooms, [c["start"] / TPS for c in clipes[1:]], fim_seq)]
         print(f"câmera: {len(zooms)} movimentos" + (f" · mais de 7,5 s parado em {', '.join(longos)}" if longos else ""), file=sys.stderr)
     for z in plano.get("zoom", []):
         t0, t1 = faixa(z)
