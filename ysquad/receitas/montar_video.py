@@ -186,12 +186,13 @@ def cena_pronta(e, quadro):
     return os.path.abspath(arq)
 
 
-def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True):
-    """Aplica o efeitos.json do corte nos clipes da V1. Tempo do corte -> tempo da mídia de cada clipe."""
+def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cortes=0.0):
+    """Aplica o efeitos.json do corte nos clipes da V1. Tempo do corte -> tempo da mídia de cada clipe.
+    zoom_cortes: trecho sim, trecho não nessa escala (centrado no rosto), pra o corte seco virar ritmo."""
     caminho = os.path.join(corte, "efeitos.json")
-    if not os.path.exists(caminho):
+    if not os.path.exists(caminho) and not zoom_cortes:
         return
-    plano = json.load(open(caminho, encoding="utf-8"))
+    plano = json.load(open(caminho, encoding="utf-8")) if os.path.exists(caminho) else {}
     _, trechos = cortefala.frases_do_corte(xml)
     pal = cortefala.palavras_indexadas(os.path.join(corte, "transcript.json"), trechos)
     fw, fh = formato_da_fonte(xml)
@@ -258,6 +259,13 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True):
             com_transform[cid] = ponto
         return com_transform[cid]
 
+    repouso = {}  # escala de cada clipe fora do zoom do plano (100, ou a do zoom alternado)
+    if zoom_cortes:
+        for k, c in enumerate(clipes):
+            if k % 2:
+                transform_no_rosto(c, c["sourceIn"])
+                kf(c["clip"], "transform", "scale_height", c["sourceIn"], float(zoom_cortes), "hold")
+                repouso[c["clip"]] = float(zoom_cortes)
     for z in plano.get("zoom", []):
         t0, t1 = faixa(z)
         for c, a, b, base in pedacos(t0, t1):
@@ -265,11 +273,11 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True):
             transform_no_rosto(c, base)
             s = float(z.get("escala", 115))
             if z.get("entrada", "seco") == "suave":
-                kf(cid, "transform", "scale_height", a, 100.0, "easeOut")
+                kf(cid, "transform", "scale_height", a, repouso.get(cid, 100.0), "easeOut")
                 kf(cid, "transform", "scale_height", b, s, "hold")
             else:
                 kf(cid, "transform", "scale_height", a, s, "hold")
-            kf(cid, "transform", "scale_height", b + um_quadro, 100.0, "hold")
+            kf(cid, "transform", "scale_height", b + um_quadro, repouso.get(cid, 100.0), "hold")
     for d in plano.get("desfoque", []):
         t0, t1 = faixa(d)
         forte, zero = float(d.get("forca", 40)), 0.0
@@ -398,6 +406,9 @@ def main():
     a.add_argument("--sem-celular", action="store_true", help="não converter vídeo de celular em HLG")
     a.add_argument("--lufs", type=float, default=-14.0)
     a.add_argument("--legenda-tamanho", type=float, default=72.0, help="16x9/4x3, px por 1080 linhas")
+    a.add_argument("--zoom-cortes", type=float, default=0.0, metavar="ESCALA", help="trecho sim, trecho não nessa escala (ex.: 108), centrado no rosto")
+    a.add_argument("--microfade", type=int, default=0, metavar="QUADROS", help="fade de áudio de N quadros na entrada e na saída de cada trecho (ex.: 1)")
+    a.add_argument("--igualar-voz", action="store_true", help="cada trecho de fala no mesmo volume (essentialSound.autoMatch)")
     a.add_argument("--revisao", action="store_true", help="marcador em cada emenda e projeto .fcproj salvo ao lado do MP4 (revisão da decupagem no app)")
     a.add_argument("--cli", default=os.path.join(AQUI, "..", "..", "target", "release", "filmcraft-cli"))
     o = a.parse_args()
@@ -448,7 +459,7 @@ def main():
             else:
                 m.run("clip.fillFrame", {"clips": [c["clip"]]})
 
-    aplicar_efeitos(m, o.corte, xml[0], clipes, focos, (w, h), not o.sem_celular)
+    aplicar_efeitos(m, o.corte, xml[0], clipes, focos, (w, h), not o.sem_celular, o.zoom_cortes)
     ids = [c["clip"] for c in clipes]
     cube = None if o.sem_log else converter_log(video_do_fcpxml(xml[0]), o.corte, o.sabor, trechos_da_fonte(clipes))
     hlg = not cube and not o.sem_celular and converter_celular(m, video_do_fcpxml(xml[0]), clipes[0]["item"], ids, o.corte)
@@ -477,6 +488,14 @@ def main():
     if not o.sem_voz:
         m.run("essentialSound.setType", {"clips": falas, "type": "dialogue"})
         m.run("essentialSound.set", {"clips": falas, "values": VOZ})
+    if o.igualar_voz:  # tomadas gravadas com energia diferente: cada trecho no mesmo volume
+        m.run("essentialSound.autoMatch", {"clips": falas})
+    if o.microfade:
+        # fade de um lado só na entrada e na saída de cada trecho: o cruzado puxa áudio de fora da borda
+        # (rabo de contagem); 1 quadro tira o estalo sem comer a voz, que começa ~0,08 s depois do corte
+        for cid in falas:
+            for lado in ("in", "out"):
+                m.run("sequence.applyAudioTransition", {"clip": cid, "effect": "constant_power", "frames": o.microfade, "edge": lado})
     if o.musica:
         item = m.run("file.import", {"paths": [os.path.abspath(o.musica)]})["items"][0]
         dur = round(seq["duration"])
