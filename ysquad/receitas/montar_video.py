@@ -398,6 +398,7 @@ def main():
     a.add_argument("--sem-celular", action="store_true", help="não converter vídeo de celular em HLG")
     a.add_argument("--lufs", type=float, default=-14.0)
     a.add_argument("--legenda-tamanho", type=float, default=72.0, help="16x9/4x3, px por 1080 linhas")
+    a.add_argument("--revisao", action="store_true", help="marcador em cada emenda e projeto .fcproj salvo ao lado do MP4 (revisão da decupagem no app)")
     a.add_argument("--cli", default=os.path.join(AQUI, "..", "..", "target", "release", "filmcraft-cli"))
     o = a.parse_args()
     if not o.musica and not o.sem_musica:  # a trilha do plano (plano_efeitos.py escreve "musica" no efeitos.json)
@@ -493,6 +494,26 @@ def main():
         # pronta (HyperFrames): a 100 %, sem som, na trilha de cima
         item = m.run("file.import", {"paths": [viva]})["items"][0]
         m.run("timeline.place", {"item": item, "track": "new", "seconds": 0.0, "audio": False})
+
+    if o.revisao:
+        # revisão da decupagem no app (25/10/2026): um marcador por emenda, com a fala dos dois lados, e o
+        # projeto salvo ao lado do MP4; o Ruan pula de emenda em emenda em vez de assistir tudo
+        palavras = []
+        try:
+            palavras = json.load(open(os.path.join(o.corte, "transcript.json"), encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+
+        def fala(a, b):
+            return " ".join(p["text"] for p in palavras if p["end"] > a and p["start"] < b)
+
+        for k, c in enumerate(clipes[1:], 1):
+            ant = clipes[k - 1]
+            nome = f"J{k}: …{fala(ant['sourceOut'] / TPS - 1.5, ant['sourceOut'] / TPS)[-40:]} | {fala(c['sourceIn'] / TPS, c['sourceIn'] / TPS + 1.5)[:40]}…"
+            m.run("markers.add", {"seconds": round(c["start"] / TPS, 3), "name": nome})
+        projeto = os.path.abspath(o.saida) + ".fcproj"
+        m.run("file.saveAs", {"path": projeto})
+        print(f"revisão: {len(clipes) - 1} emendas marcadas · projeto {projeto}", file=sys.stderr)
 
     t = time.time()
     r = m.run("file.exportMedia", {"path": os.path.abspath(o.saida) + ".mp4", "format": "h264", "hardwareEncoding": "auto", "gpuRendering": "auto",

@@ -17,7 +17,9 @@ produto (`crates/`, gráficos, modelos `.fcgt`) é do upstream e não é mexido 
   corte (zoom no rosto, desfoque, B-roll, cenas de motion prontas e o modo `metade`, por índice de
   palavra); voz limpa,
   `--musica` com ducking e -14 LUFS; log da Sony e vídeo de celular em HDR convertidos sozinhos
-  (ver `cor/`).
+  (ver `cor/`). `--revisao`: marcador em cada emenda (`J1: …fim | começo…`) e projeto `.fcproj` salvo
+  ao lado do MP4, pra revisar a decupagem no app pulando de emenda em emenda (o `decupar.py` da
+  `cortar-fala` liga sozinho).
 - `receitas/corte.py`: o corte do `cortar-fala` no tempo do corte (frases, trechos e o tempo de cada
   palavra pelo índice do `indice.py`), usado pelos efeitos.
 - `cor/log_709.py`: S-Log2/S-Log3 da Sony para Rec.709 como LUT de entrada. Modo `neutro`
