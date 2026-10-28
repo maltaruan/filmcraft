@@ -39,7 +39,8 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
   broll = o trecho aprovado (pela get-brolls) ou uma FOTO (png/jpg/webp/tif) cobre a fala da primeira à
   última palavra (ou de `t0` a `t1`, segundos do corte), numa trilha acima do vídeo, sem som; "zoom"
   aproxima devagar até a escala dada. "modo" (o clássico, 28/10): "cheia" (padrão) preenche o quadro;
-  "metade" (9x16) põe o material na metade de cima e desce o rosto pra de baixo, como a cena metade;
+  "metade" (9x16) põe o material numa metade e o rosto na outra: "lado" "cima" (padrão, como a cena
+  metade) ou "baixo" (rosto em cima); dois metade ao mesmo tempo, um de cada lado, tiram o rosto da tela;
   "abaixo" (9x16) deixa o rosto cheio e põe o material inteiro num cartão embaixo do rosto.
   motion = cena de motion pronta do Nolan (`~/motion-ysquad/FILMCRAFT.md`): criada no HyperFrames ou
   no Remotion, ou no EffectCraft quando depende da filmagem (rastreio, recorte, efeito na imagem).
@@ -374,12 +375,14 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cor
             kf(cid, "gaussian_blur", "blurriness", a, ida, "linear")
             kf(cid, "gaussian_blur", "blurriness", b, volta, "hold")
             kf(cid, "gaussian_blur", "blurriness", b + um_quadro, 0.0, "hold")
-    trilha_broll = None
-    for r in plano.get("broll", []):
+    trilhas_broll = []  # [nome, fim do último]: B-roll que se sobrepõe (as duas metades) abre outra trilha
+    for r in sorted(plano.get("broll", []), key=lambda r: (float(r["t0"]), float(r["t1"])) if "t0" in r else faixa(r)):
         t0, t1 = (float(r["t0"]), float(r["t1"])) if "t0" in r else faixa(r)
-        modo, arq = r.get("modo", "cheia"), os.path.abspath(r["arquivo"])
+        modo, arq, lado = r.get("modo", "cheia"), os.path.abspath(r["arquivo"]), r.get("lado", "cima")
         if modo not in ("cheia", "metade", "abaixo"):
             sys.exit(f"broll {r}: o modo é cheia, metade ou abaixo")
+        if lado not in ("cima", "baixo"):
+            sys.exit(f"broll {r}: o lado é cima ou baixo")
         if modo != "cheia" and quadro[1] <= quadro[0]:
             sys.exit(f"broll {r}: metade e abaixo são do 9x16")
         if not os.path.exists(arq):
@@ -387,9 +390,13 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cor
         foto = arq.lower().endswith(FOTO)
         item = m.run("file.import", {"paths": [arq]})["items"][0]
         ini = 0 if foto else round(float(r.get("inicio", 0.0)) * TPS)
-        bc = m.run("timeline.place", {"item": item, "track": trilha_broll or "new", "time": round(t0 * TPS), "sourceIn": ini,
+        livre = next((tr for tr in trilhas_broll if tr[1] <= t0 + 1e-6), None)
+        bc = m.run("timeline.place", {"item": item, "track": livre[0] if livre else "new", "time": round(t0 * TPS), "sourceIn": ini,
                                       "duration": round((t1 - t0) * TPS), "audio": False})["clips"][0]
-        trilha_broll = trilha_broll or "V2"
+        if livre:
+            livre[1] = t1
+        else:
+            trilhas_broll.append([f"V{len(m.run('sequence.inspect')['video'])}", t1])
         m.run("clip.fillFrame", {"clips": [bc]})
         if celular and not foto:
             converter_celular(m, arq, item, [bc], corte)
@@ -406,15 +413,16 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cor
             # (o rosto desce como nas cenas metade); abaixo = cartão inteiro embaixo do rosto, sem mexer nele.
             (w, h), (W, H) = tamanho_media(arq), quadro
             k = max(W / w, H / h)
-            s, cy = (max(W / w, H / 2 / h), H / 4) if modo == "metade" else (min(0.86 * W / w, 0.30 * H / h), 0.79 * H)
+            s, cy = (max(W / w, H / 2 / h), H / 4 if lado == "cima" else 3 * H / 4) if modo == "metade" \
+                else (min(0.86 * W / w, 0.30 * H / h), 0.79 * H)
             base = 100.0 * s / k
             for prm, v in (("anchor", [w / 2, h / 2]), ("position", [w / 2, h / 2 + (cy - H / 2) / k]), ("scale_height", base)):
                 m.run("effects.setParam", {"clip": bc, "effect": "transform", "param": prm, "value": v})
             if modo == "metade":
                 m.run("effects.apply", {"clips": [bc], "effect": "Crop"})
-                m.run("effects.setParam", {"clip": bc, "effect": "crop", "param": "bottom", "value": 50.0})
+                m.run("effects.setParam", {"clip": bc, "effect": "crop", "param": "bottom" if lado == "cima" else "top", "value": 50.0})
                 for cr, a, b, bs in pedacos(t0, t1):
-                    metade.setdefault(cr["clip"], []).append([a, b, bs])
+                    metade.setdefault(cr["clip"], []).append([a, b, bs, lado])
         if r.get("zoom"):
             kf(bc, "transform", "scale_height", c["sourceIn"], base, "linear")
             kf(bc, "transform", "scale_height", c["sourceOut"], base * float(r["zoom"]) / 100, "hold")
@@ -431,27 +439,36 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cor
             trilhas_motion.append([f"V{len(m.run('sequence.inspect')['video'])}", t1])
         if modo == "metade":
             for c, a, b, base in pedacos(t0, t1):
-                metade.setdefault(c["clip"], []).append([a, b, base])
+                metade.setdefault(c["clip"], []).append([a, b, base, "cima"])
     # montagem, não motion: o rosto (âncora do Transform) desce pra 3/4 da altura e a metade de cima do
     # vídeo é cortada; a cena ocupa a metade de cima. Só durante a cena: quadros-chave hold. Cenas metade
     # encostadas no mesmo clipe viram uma faixa só: o rosto devolvido no fim de uma (em b, o 1º quadro
     # depois dela) cairia no quadro que o desce na seguinte. Devolver em b + 1 deixava um quadro preto.
     for cid, faixas in metade.items():
+        # lado = onde fica o MATERIAL; o rosto vai pro outro. Lados diferentes encostados: a troca cai no
+        # mesmo quadro (o da seguinte sobrescreve a devolução da anterior). Os dois lados ao mesmo tempo
+        # (material em cima e embaixo) cobrem o rosto inteiro: o que ele faz por baixo não aparece.
         juntas = []
-        for a, b, base in sorted(faixas):
-            if juntas and a <= juntas[-1][1] + um_quadro:
+        for a, b, base, lado in sorted(faixas):
+            if juntas and a <= juntas[-1][1] + um_quadro and lado == juntas[-1][3]:
                 juntas[-1][1] = max(juntas[-1][1], b)
+            elif juntas and a <= juntas[-1][1] + um_quadro:
+                juntas.append([juntas[-1][1], b, base, lado])
             else:
-                juntas.append([a, b, base])
+                juntas.append([a, b, base, lado])
         ponto = transform_no_rosto(por_id[cid], juntas[0][2])
         kf(cid, "transform", "position", juntas[0][2], ponto, "hold")
         m.run("effects.apply", {"clips": [cid], "effect": "Crop"})
-        kf(cid, "crop", "top", juntas[0][2], 0.0, "hold")
-        for a, b, _ in juntas:
-            kf(cid, "transform", "position", a, [ponto[0], 0.75 * fh], "hold")
+        for borda in ("top", "bottom"):
+            kf(cid, "crop", borda, juntas[0][2], 0.0, "hold")
+        for a, b, _, lado in juntas:
+            cima = lado == "cima"
+            kf(cid, "transform", "position", a, [ponto[0], (0.75 if cima else 0.25) * fh], "hold")
             kf(cid, "transform", "position", b, ponto, "hold")
-            kf(cid, "crop", "top", a, 50.0, "hold")
-            kf(cid, "crop", "top", b, 0.0, "hold")
+            kf(cid, "crop", "top", a, 50.0 if cima else 0.0, "hold")
+            kf(cid, "crop", "bottom", a, 0.0 if cima else 50.0, "hold")
+            for borda in ("top", "bottom"):
+                kf(cid, "crop", borda, b, 0.0, "hold")
     trilhas_sob = []  # [nome, fim do último]
     for e in plano.get("sobrepor", []):
         if e["de"] not in pal or ("ate" in e and e["ate"] not in pal):
