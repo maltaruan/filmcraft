@@ -36,8 +36,11 @@ PASTA_DO_CORTE é a pasta de trabalho do `cortar-fala` (`<nome>.fcpxml` + `legen
   zoom = efeito Transform centrado no rosto, por cima do enquadramento: "seco" corta pra escala
   na primeira palavra e volta no fim da última; "suave" aproxima devagar até o fim e corta de volta.
   desfoque = Gaussian Blur: "abre" vai da força a zero (foco que chega), "fecha" de zero à força.
-  broll = o trecho aprovado (pela get-brolls) cobre a fala da primeira à última palavra, numa
-  trilha acima do vídeo, sem som, preenchendo o quadro; "zoom" aproxima devagar até a escala dada.
+  broll = o trecho aprovado (pela get-brolls) ou uma FOTO (png/jpg/webp/tif) cobre a fala da primeira à
+  última palavra (ou de `t0` a `t1`, segundos do corte), numa trilha acima do vídeo, sem som; "zoom"
+  aproxima devagar até a escala dada. "modo" (o clássico, 28/10): "cheia" (padrão) preenche o quadro;
+  "metade" (9x16) põe o material na metade de cima e desce o rosto pra de baixo, como a cena metade;
+  "abaixo" (9x16) deixa o rosto cheio e põe o material inteiro num cartão embaixo do rosto.
   motion = cena de motion pronta do Nolan (`~/motion-ysquad/FILMCRAFT.md`): criada no HyperFrames ou
   no Remotion, ou no EffectCraft quando depende da filmagem (rastreio, recorte, efeito na imagem).
   ProRes 4444 com transparência, já no tamanho do vídeo final e no lugar. A receita não cria nem
@@ -116,6 +119,17 @@ def duracao_media(caminho):
     """Duração do arquivo em segundos (ffprobe)."""
     r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", caminho], capture_output=True, text=True)
     return float(r.stdout.strip())
+
+
+def tamanho_media(caminho):
+    """Largura e altura do vídeo ou da foto (ffprobe)."""
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", caminho],
+                       capture_output=True, text=True)
+    w, h = r.stdout.strip().split(",")[:2]
+    return int(w), int(h)
+
+
+FOTO = (".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff")
 
 
 def trechos_da_fonte(clipes):
@@ -362,22 +376,48 @@ def aplicar_efeitos(m, corte, xml, clipes, focos, quadro, celular=True, zoom_cor
             kf(cid, "gaussian_blur", "blurriness", b + um_quadro, 0.0, "hold")
     trilha_broll = None
     for r in plano.get("broll", []):
-        t0, t1 = faixa(r)
-        item = m.run("file.import", {"paths": [os.path.abspath(r["arquivo"])]})["items"][0]
-        ini = round(float(r.get("inicio", 0.0)) * TPS)
+        t0, t1 = (float(r["t0"]), float(r["t1"])) if "t0" in r else faixa(r)
+        modo, arq = r.get("modo", "cheia"), os.path.abspath(r["arquivo"])
+        if modo not in ("cheia", "metade", "abaixo"):
+            sys.exit(f"broll {r}: o modo é cheia, metade ou abaixo")
+        if modo != "cheia" and quadro[1] <= quadro[0]:
+            sys.exit(f"broll {r}: metade e abaixo são do 9x16")
+        if not os.path.exists(arq):
+            sys.exit(f"broll {r}: arquivo não existe")
+        foto = arq.lower().endswith(FOTO)
+        item = m.run("file.import", {"paths": [arq]})["items"][0]
+        ini = 0 if foto else round(float(r.get("inicio", 0.0)) * TPS)
         bc = m.run("timeline.place", {"item": item, "track": trilha_broll or "new", "time": round(t0 * TPS), "sourceIn": ini,
                                       "duration": round((t1 - t0) * TPS), "audio": False})["clips"][0]
         trilha_broll = trilha_broll or "V2"
         m.run("clip.fillFrame", {"clips": [bc]})
-        if celular:
-            converter_celular(m, os.path.abspath(r["arquivo"]), item, [bc], corte)
+        if celular and not foto:
+            converter_celular(m, arq, item, [bc], corte)
+        if modo == "cheia" and not r.get("zoom"):
+            continue
+        # o clipe como ficou (o encaixe arredonda pro quadro)
+        c = next(x for tr in m.run("sequence.inspect")["video"] for x in tr["items"] if x["clip"] == bc)
+        por_id[bc] = c
+        m.run("effects.apply", {"clips": [bc], "effect": "Transform"})
+        base = 100.0
+        if modo != "cheia":
+            # Transform no espaço do próprio arquivo, por cima do fillFrame (escala k): o centro do arquivo é o
+            # centro do quadro. metade = cobre a metade de cima e o Crop corta da metade do arquivo pra baixo
+            # (o rosto desce como nas cenas metade); abaixo = cartão inteiro embaixo do rosto, sem mexer nele.
+            (w, h), (W, H) = tamanho_media(arq), quadro
+            k = max(W / w, H / h)
+            s, cy = (max(W / w, H / 2 / h), H / 4) if modo == "metade" else (min(0.86 * W / w, 0.30 * H / h), 0.79 * H)
+            base = 100.0 * s / k
+            for prm, v in (("anchor", [w / 2, h / 2]), ("position", [w / 2, h / 2 + (cy - H / 2) / k]), ("scale_height", base)):
+                m.run("effects.setParam", {"clip": bc, "effect": "transform", "param": prm, "value": v})
+            if modo == "metade":
+                m.run("effects.apply", {"clips": [bc], "effect": "Crop"})
+                m.run("effects.setParam", {"clip": bc, "effect": "crop", "param": "bottom", "value": 50.0})
+                for cr, a, b, bs in pedacos(t0, t1):
+                    metade.setdefault(cr["clip"], []).append([a, b, bs])
         if r.get("zoom"):
-            # o clipe como ficou (o encaixe arredonda pro quadro)
-            c = next(x for tr in m.run("sequence.inspect")["video"] for x in tr["items"] if x["clip"] == bc)
-            por_id[bc] = c
-            m.run("effects.apply", {"clips": [bc], "effect": "Transform"})
-            kf(bc, "transform", "scale_height", c["sourceIn"], 100.0, "linear")
-            kf(bc, "transform", "scale_height", c["sourceOut"], float(r["zoom"]), "hold")
+            kf(bc, "transform", "scale_height", c["sourceIn"], base, "linear")
+            kf(bc, "transform", "scale_height", c["sourceOut"], base * float(r["zoom"]) / 100, "hold")
     trilhas_motion = []  # [nome, fim da última cena]
     for t0, t1, modo, arquivo, inicio in sorted(cenas, key=lambda x: (x[0], x[1])):
         # a cena chega pronta: a 100 %, no centro do quadro, sem encaixe nem posição
